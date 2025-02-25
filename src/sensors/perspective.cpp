@@ -150,8 +150,6 @@ public:
         );
 
         update_camera_transforms();
-
-        std::cout << "!!!" << std::endl;
     }
 
     void traverse(TraversalCallback *callback) override {
