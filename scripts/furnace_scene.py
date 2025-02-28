@@ -10,7 +10,7 @@ import polyscope as ps
 
 GEO_CENTER = np.zeros(3)
 GEO_RADIUS = 1.0
-EMITTER_INTENSITY = 1.0
+EMITTER_INTENSITY = np.pi
 BSDF_COLOR_REF = [0.2, 0.25, 0.7]
 SENSOR_COUNT = 1
 SENSOR_SPP = 64
@@ -31,10 +31,32 @@ def make_geometry(center, radius, color_ref) -> dict:
     }
     return geo_dict
 
+def make_textured_geometry(center, radius) -> dict:
+    geo_dict = {
+        "type": "sphere",
+        "center": [center[0], center[1], center[2]],
+        "radius": radius,
+        "flip_normals": True,
+        "bsdf": {
+            "type": "diffuse",
+            "reflectance": {
+                "type": "bitmap",
+                # "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/floor_tiles.jpg"
+                # "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/leaf_mask.png"
+                "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/carrot.png",
+                # "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/noise_02.png"
+                # "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/museum.exr"
+                "filter_type": "nearest",
+                "raw": True
+            }
+        }
+    }
+    return geo_dict
+
 def make_emitter(center, emitter_intensity) -> dict:
     emitter_dict = {
         "type": "point",
-        "position": [center[0], center[1], center[2] + 0.1],
+        "position": [center[0], center[1], center[2] + 0.4],
         "intensity": {
             "type": "uniform",
             "value": emitter_intensity,
@@ -42,54 +64,37 @@ def make_emitter(center, emitter_intensity) -> dict:
     }
     return emitter_dict
 
-def make_sensor(origins: np.ndarray, directions: np.ndarray, spp: int) -> dict:
-    probes = {
-        "type": "batch",
-            "film": {
-                "type": "hdrfilm",
-                "rfilter": { "type": "box" },
-                "width": origins.shape[0],
-                "height": 1,
-            },
-            "sampler": {
-                "type": "independent",
-                "sample_count": spp,
-            }
-    }
-
-    for idx, (origin, direction) in enumerate(zip(origins, directions)):
-        sensor_name = f"sensor{idx}"
-        probe = {
-            "type": "radiancemeter",
-            "origin": [origin[0], origin[1], origin[2]],
-            "direction": [direction[0], direction[1], direction[2]],
-            "film": {
-                "type": "hdrfilm",
-                "pixel_format": "rgb",
-                "rfilter": { "type": "box" },
-                "width": 1,
-                "height": 1,
-            },
+def make_sensor(spp: int = 32) -> dict:
+    camera = {
+        "type": "perspective",
+        "fov": 135,
+        "to_world": mi.ScalarTransform4f().look_at(
+            origin=mi.ScalarPoint3f([0.0, 0.0, 0.0]),
+            target=mi.ScalarPoint3f([1.0, 0.0, 0.0]),
+            up=    mi.ScalarPoint3f([0.0, 0.0, 1.0])),
+        "film": {
+            "type": "hdrfilm",
+            "width": 256,
+            "height": 256,
+        },
+        "sampler": {
+            "type": "independent",
+            "sample_count": spp,
         }
-        probes[sensor_name] = probe
+    }
+    return camera
 
-    return probes
 
-def make_scene(color_ref = BSDF_COLOR_REF):
-    ts = np.linspace(0, 2 * np.pi, SENSOR_COUNT)
-    origins = np.c_[np.cos(ts), np.sin(ts), np.zeros_like(ts)] * GEO_RADIUS
-    directions = GEO_CENTER[None,:] - origins
-    directions /= np.linalg.norm(directions, axis=1)[:,None]
-
+def make_scene(color_ref = BSDF_COLOR_REF, use_texture = False):
     scene_dict = {
         "type": "scene",
         "myintegrator": {
             "type": "path",
-            "max_depth": 5
+            "max_depth": 10 # 5
         },
-        "mysphere": make_geometry(GEO_CENTER, GEO_RADIUS, color_ref),
+        "mysphere": make_textured_geometry(GEO_CENTER, GEO_RADIUS) if use_texture else make_geometry(GEO_CENTER, GEO_RADIUS, color_ref),
         "myemitter": make_emitter(GEO_CENTER, EMITTER_INTENSITY),
-        "mysensor": make_sensor(origins, directions, SENSOR_SPP),
+        "mysensor": make_sensor(SENSOR_SPP),
     }
     scene = mi.load_dict(scene_dict)
     return scene
