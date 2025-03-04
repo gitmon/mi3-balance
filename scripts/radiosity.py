@@ -25,28 +25,32 @@ class SceneSurfaceSampler:
         self.shape_ptrs = shape_ptrs
         self.delta_emitters = [emitter for emitter in scene.emitters() if is_delta_emitter(emitter)]
 
-    def sample(self, sampler: mi.Sampler, num_points: int) -> mi.SurfaceInteraction3f:
+    def sample(self, num_points: int) -> mi.SurfaceInteraction3f:
         '''
         TODO
         '''
         # Generate `NUM_POINTS` different surface samples
         # TODO: the seed value matters! Can we change the Sampler width without resetting the seed?
-        sampler.seed(0, num_points)
-        idx = self.distribution.sample(sampler.next_1d(), True)
+        sampler = mi.PCG32(size=num_points)
+        idx = self.distribution.sample(sampler.next_float32(), True)
         shape = dr.gather(mi.ShapePtr, self.shape_ptrs, idx)
-        si = shape.eval_parameterization(sampler.next_2d(), active=True)
-        # TODO: the method below should give more uniform sampling, if we can get it to work
+        uv = mi.Point2f(sampler.next_float32(), sampler.next_float32())
+        si = shape.eval_parameterization(uv, active=True)
+        # # TODO: the method below should give more uniform sampling, if we can get it to work
         # pos_sample = shape.sample_position(time=0.0, sample=sampler.next_2d())
         # si = mi.SurfaceInteraction3f(pos_sample, dr.zeros(mi.Color0f))
 
         # Generate one outgoing ray per surface sample
-        wo_local = mi.warp.square_to_cosine_hemisphere(sampler.next_2d())
+        uv = mi.Point2f(sampler.next_float32(), sampler.next_float32())
+        wo_local = mi.warp.square_to_cosine_hemisphere(uv)
         si.wi = wo_local
 
         # Compute the Li contribution from delta emitter sources
         # This can eventually be modified/extended to handle envmaps
-        point = self.delta_emitters[0]
-        return si, point.sample_direction(si, sampler.next_2d(), True)
+        point_light = self.delta_emitters[0]
+        # NOTE: sample `uv` is not actually used in the case of point lights
+        uv = mi.Point2f(sampler.next_float32(), sampler.next_float32())
+        return si, point_light.sample_direction(si, uv, True)
     
 class RadianceCacheMITSUBA:
     def __init__(self, scene: mi.Scene, spp_per_wo: int, spp_per_wi: int):
@@ -61,7 +65,7 @@ class RadianceCacheMITSUBA:
         self.spp_per_wo = spp_per_wo
         self.spp_per_wi = spp_per_wi
 
-    def query_cached_Lo(self, sampler: mi.Sampler, si: mi.SurfaceInteraction3f)  -> mi.Color3f:
+    def query_cached_Lo(self, sampler_rt: mi.Sampler, si: mi.SurfaceInteraction3f)  -> mi.Color3f:
         '''
         Inputs:
             - sampler: Sampler. The pseudo-random number generator.
@@ -82,12 +86,12 @@ class RadianceCacheMITSUBA:
         # radiance.
         ray_flat_idxs = dr.repeat(dr.arange(UInt, num_points), self.spp_per_wo)    # contiguous order
         rays_flattened = dr.gather(mi.Ray3f, Lo_rays, ray_flat_idxs, mode = dr.ReduceMode.Direct)
-        sampler.seed(1, num_points * self.spp_per_wo)
-        colors, _, _ = self.integrator.sample(self.scene, sampler, rays_flattened)
+        sampler_rt.seed(0, num_points * self.spp_per_wo)
+        colors, _, _ = self.integrator.sample(self.scene, sampler_rt, rays_flattened)
         Lo = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = self.spp_per_wo) / self.spp_per_wo
         return Lo
 
-    def query_cached_Li(self, sampler: mi.Sampler, si: mi.SurfaceInteraction3f, num_wi: int) -> mi.Color3f:
+    def query_cached_Li(self, sampler_rt: mi.Sampler, si: mi.SurfaceInteraction3f, num_wi: int) -> mi.Color3f:
         '''
         Inputs:
             - sampler: Sampler. The pseudo-random number generator.
@@ -114,7 +118,6 @@ class RadianceCacheMITSUBA:
         # `si` array to get `NUM_POINTS * NUM_DIRS` rays.
         #
         num_points = dr.width(si)
-        sampler.seed(2, num_points * num_wi)
         # the `flat_idxs` has the form: 
         #                                      v---- NUM_WI copies ---v
         # [0, ..., 0, 1, ..., 1,    ...    NUM_POINTS-1, ..., NUM_POINTS-1]   (contiguous order)
@@ -124,26 +127,35 @@ class RadianceCacheMITSUBA:
         # [s0, ..., s0, s1, ..., s1,    ...    sN-1, ..., sN-1]
         #
         # NOTE: `dr.ReduceMode` is not used for the `gather()` itself, but instead to 
-        # implement its adjoint operation (scatter) for reverse-mode AD. For this context,
+        # implement its adjoint operation (scatter) for reverse-mode AD. For our context,
         # the choice doesn't matter since we never backprop through this part of the algorithm,
         # but `ReduceMode.Local` is probably optimal when our arrays are laid out 
         # contiguously, as we do here.
         si_flattened = dr.gather(mi.SurfaceInteraction3f, si, si_flat_idxs, mode = dr.ReduceMode.Local)
 
         # Compute the incident radiance on `A` for a direction, `wi`
-        wi_local = mi.warp.square_to_uniform_hemisphere(sampler.next_2d())
+        NUM_RAYS = num_points * num_wi
+        sampler_ = mi.PCG32(size=NUM_RAYS)
+        uv = mi.Point2f(sampler_.next_float32(), sampler_.next_float32())
+        wi_local = mi.warp.square_to_cosine_hemisphere(uv)
+        wi_pdf   = mi.warp.square_to_cosine_hemisphere_pdf(wi_local)
+        # wi_local = mi.warp.square_to_cosine_hemisphere(uv)    # TODO
         wi_world = si_flattened.to_world(wi_local)
         wi_rays = si_flattened.spawn_ray(wi_world)
 
         # Compute Li for each of the incident directions. For each `Li_ray`, trace `SPP_LI` 
         # different MC samples and average them to get the outgoing radiance.
-        NUM_RAYS = num_points * num_wi
         ray_flat_idxs = dr.repeat(dr.arange(UInt, NUM_RAYS), self.spp_per_wi)    # contiguous order
         rays_flattened = dr.gather(mi.Ray3f, wi_rays, ray_flat_idxs, mode = dr.ReduceMode.Local)
-        sampler.seed(3, NUM_RAYS * self.spp_per_wi)
-        colors, _, _ = self.integrator.sample(self.scene, sampler, rays_flattened)
+        sampler_rt.seed(1, NUM_RAYS * self.spp_per_wi)
+        colors, _, _ = self.integrator.sample(self.scene, sampler_rt, rays_flattened)
         Li = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = self.spp_per_wi) / self.spp_per_wi
+        Li *= dr.rcp(wi_pdf)
         return Li, wi_local, si_flattened
+    
+    def query_cached_Le(self, si: mi.SurfaceInteraction3f) -> mi.Color3f:
+        # wo_local = si.wi
+        return dr.zeros(mi.Color3f, dr.width(si))
 
 def compute_loss(
         scene_sampler: SceneSurfaceSampler, 
@@ -163,51 +175,45 @@ def compute_loss(
     
     # TODO: we can further re-arrange the steps to cut down/consolidate kernel launches
     '''
-    # Temp workaround. TODO: avoid initializing a new sampler at each iteration
-    sampler: mi.Sampler = mi.load_dict({'type': 'independent'})
+    with dr.suspend_grad():
 
-    # Sample `NUM_POINTS` different surface points
-    si, (delta_emitter_sample, delta_emitter_Li) = scene_sampler.sample(sampler, num_points)
+        # Sample `NUM_POINTS` different surface points
+        si, (delta_emitter_sample, delta_emitter_Li) = scene_sampler.sample(num_points)
 
-    # Evaluate LHS of balance equation
-    lhs = radiance_cache.query_cached_Lo(sampler, si)
+        # Evaluate RHS scene emitter contribution
+        ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
+        f_emitter = trainable_bsdf.eval(ctx, si, wo = si.to_local(delta_emitter_sample.d))
+        rhs = f_emitter * delta_emitter_Li
 
-    # Evaluate RHS integral
-    Li, wi_local, si_flattened = radiance_cache.query_cached_Li(sampler, si, num_wi)
-    ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
-    f_io, material_pdf = trainable_bsdf.eval_pdf(ctx, si = si_flattened, wo = wi_local)
-    integrand = f_io * dr.detach(Li * dr.rcp(material_pdf))
-    rhs = dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
+        # Evaluate LHS of balance equation
+        # Temp workaround. TODO: avoid initializing a new sampler at each iteration
+        lhs = -radiance_cache.query_cached_Le(si)
 
-    # flat_idxs = dr.tile(dr.arange(UInt, num_points), num_wi)
-    # rhs = dr.zeros(mi.Color3f, dr.width(lhs))
-    # dr.scatter_reduce(dr.ReduceOp.Add, rhs, integrand, flat_idxs)
-    # rhs /= num_wi
+        sampler_rt: mi.Sampler = mi.load_dict({'type': 'independent'})
+        lhs += radiance_cache.query_cached_Lo(sampler_rt, si)
 
-    # print(f"term1:{rhs}")
+        # Evaluate RHS integral
+        Li, wi_local, si_flattened = radiance_cache.query_cached_Li(sampler_rt, si, num_wi)
 
-    # Add contribution from scene emitters
-    ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
-    delta_emitter_Li = dr.detach(delta_emitter_Li)
-    delta_emitter_Li *= trainable_bsdf.eval(ctx, si, wo = si.to_local(delta_emitter_sample.d))
-    rhs += delta_emitter_Li
-    lhs = dr.detach(lhs)
+        with dr.resume_grad():
+            f_io = trainable_bsdf.eval(ctx, si = si_flattened, wo = wi_local)
+            integrand = f_io * Li
+            rhs += dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
 
-    # # Account for surface emission at `A`
-    # lhs += radiance_cache.query_Le(si)
+            # print(f"term1:{rhs}")
 
-    
-    # print(f"term2:{delta_emitter_Li}")
+        
+            # print(f"term2:{delta_emitter_Li}")
 
-    # # # DEBUG
-    # print(f"Li:{rhs}")
-    # # print(f"Light contribution: {point_Li}")
-    # # print(f"Light contribution an: {albedo * dr.inv_pi * I / (r * r)}")
-    # print(f"Lo:{lhs}")
-    # # albedo = mi.Color3f([0.2, 0.25, 0.7])
-    # # # L_an = albedo * dr.rcp(1.0 - albedo) * intensity / (dr.pi * r ** 2)
-    # # L_an = delta_emitter_Li * dr.rcp(1.0 - albedo)
-    # # print(f"Lo_an:{L_an}")
-    # # print(L_an/lhs)
+            # # # DEBUG
+            # print(f"Li:{rhs}")
+            # # print(f"Light contribution: {point_Li}")
+            # # print(f"Light contribution an: {albedo * dr.inv_pi * I / (r * r)}")
+            # print(f"Lo:{lhs}")
+            # # albedo = mi.Color3f([0.2, 0.25, 0.7])
+            # # # L_an = albedo * dr.rcp(1.0 - albedo) * intensity / (dr.pi * r ** 2)
+            # # L_an = delta_emitter_Li * dr.rcp(1.0 - albedo)
+            # # print(f"Lo_an:{L_an}")
+            # # print(L_an/lhs)
 
-    return 0.5 * dr.mean(dr.squared_norm(lhs - rhs))
+            return 0.5 * dr.mean(dr.squared_norm(lhs - rhs))
