@@ -25,23 +25,23 @@ class SceneSurfaceSampler:
         self.shape_ptrs = shape_ptrs
         self.delta_emitters = [emitter for emitter in scene.emitters() if is_delta_emitter(emitter)]
 
-    def sample(self, num_points: int) -> mi.SurfaceInteraction3f:
+    def sample(self, num_points: int, sampler: mi.Sampler, rng_state: int = 0) -> mi.SurfaceInteraction3f:
         '''
         TODO
         '''
         # Generate `NUM_POINTS` different surface samples
         # TODO: the seed value matters! Can we change the Sampler width without resetting the seed?
-        sampler = mi.PCG32(size=num_points)
-        idx = self.distribution.sample(sampler.next_float32(), True)
+        sampler.seed(rng_state, num_points)
+        idx = self.distribution.sample(sampler.next_1d(), True)
         shape = dr.gather(mi.ShapePtr, self.shape_ptrs, idx)
-        uv = mi.Point2f(sampler.next_float32(), sampler.next_float32())
+        uv = sampler.next_2d()
         si = shape.eval_parameterization(uv, active=True)
         # # TODO: the method below should give more uniform sampling, if we can get it to work
         # pos_sample = shape.sample_position(time=0.0, sample=sampler.next_2d())
         # si = mi.SurfaceInteraction3f(pos_sample, dr.zeros(mi.Color0f))
 
         # Generate one outgoing ray per surface sample
-        uv = mi.Point2f(sampler.next_float32(), sampler.next_float32())
+        uv = sampler.next_2d()
         wo_local = mi.warp.square_to_cosine_hemisphere(uv)
         si.wi = wo_local
 
@@ -49,7 +49,7 @@ class SceneSurfaceSampler:
         # This can eventually be modified/extended to handle envmaps
         point_light = self.delta_emitters[0]
         # NOTE: sample `uv` is not actually used in the case of point lights
-        uv = mi.Point2f(sampler.next_float32(), sampler.next_float32())
+        uv = sampler.next_2d()
         return si, point_light.sample_direction(si, uv, True)
     
 class RadianceCacheMITSUBA:
@@ -65,7 +65,7 @@ class RadianceCacheMITSUBA:
         self.spp_per_wo = spp_per_wo
         self.spp_per_wi = spp_per_wi
 
-    def query_cached_Lo(self, sampler_rt: mi.Sampler, si: mi.SurfaceInteraction3f)  -> mi.Color3f:
+    def query_cached_Lo(self, si: mi.SurfaceInteraction3f, sampler_rt: mi.Sampler, rng_state: int = 0)  -> mi.Color3f:
         '''
         Inputs:
             - sampler: Sampler. The pseudo-random number generator.
@@ -86,12 +86,22 @@ class RadianceCacheMITSUBA:
         # radiance.
         ray_flat_idxs = dr.repeat(dr.arange(UInt, num_points), self.spp_per_wo)    # contiguous order
         rays_flattened = dr.gather(mi.Ray3f, Lo_rays, ray_flat_idxs, mode = dr.ReduceMode.Direct)
-        sampler_rt.seed(0, num_points * self.spp_per_wo)
+        sampler_rt.seed(rng_state + 0x1000, num_points * self.spp_per_wo)
         colors, _, _ = self.integrator.sample(self.scene, sampler_rt, rays_flattened)
+        # colors, _, _, _ = self.integrator.sample(
+        #     dr.ADMode.Primal,
+        #     self.scene, 
+        #     sampler_rt, 
+        #     rays_flattened, 
+        #     depth=0,
+        #     δL=0,
+        #     δaovs=[],
+        #     state_in=[],
+        #     active=True)  # DEBUG
         Lo = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = self.spp_per_wo) / self.spp_per_wo
         return Lo
 
-    def query_cached_Li(self, sampler_rt: mi.Sampler, si: mi.SurfaceInteraction3f, num_wi: int) -> mi.Color3f:
+    def query_cached_Li(self, si: mi.SurfaceInteraction3f, num_wi: int, sampler_rt: mi.Sampler, rng_state: int = 0) -> mi.Color3f:
         '''
         Inputs:
             - sampler: Sampler. The pseudo-random number generator.
@@ -135,11 +145,10 @@ class RadianceCacheMITSUBA:
 
         # Compute the incident radiance on `A` for a direction, `wi`
         NUM_RAYS = num_points * num_wi
-        sampler_ = mi.PCG32(size=NUM_RAYS)
-        uv = mi.Point2f(sampler_.next_float32(), sampler_.next_float32())
+        sampler_rt.seed(rng_state + 0x2000, NUM_RAYS)
+        uv = sampler_rt.next_2d()
         wi_local = mi.warp.square_to_cosine_hemisphere(uv)
         wi_pdf   = mi.warp.square_to_cosine_hemisphere_pdf(wi_local)
-        # wi_local = mi.warp.square_to_cosine_hemisphere(uv)    # TODO
         wi_world = si_flattened.to_world(wi_local)
         wi_rays = si_flattened.spawn_ray(wi_world)
 
@@ -147,8 +156,18 @@ class RadianceCacheMITSUBA:
         # different MC samples and average them to get the outgoing radiance.
         ray_flat_idxs = dr.repeat(dr.arange(UInt, NUM_RAYS), self.spp_per_wi)    # contiguous order
         rays_flattened = dr.gather(mi.Ray3f, wi_rays, ray_flat_idxs, mode = dr.ReduceMode.Local)
-        sampler_rt.seed(1, NUM_RAYS * self.spp_per_wi)
+        sampler_rt.seed(rng_state + 0x3000, NUM_RAYS * self.spp_per_wi)
         colors, _, _ = self.integrator.sample(self.scene, sampler_rt, rays_flattened)
+        # colors, _, _, _ = self.integrator.sample(
+        #     dr.ADMode.Primal,
+        #     self.scene, 
+        #     sampler_rt, 
+        #     rays_flattened, 
+        #     depth=1,
+        #     δL=0,
+        #     δaovs=[],
+        #     state_in=[],
+        #     active=True)  # DEBUG
         Li = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = self.spp_per_wi) / self.spp_per_wi
         Li *= dr.rcp(wi_pdf)
         return Li, wi_local, si_flattened
@@ -162,7 +181,9 @@ def compute_loss(
         radiance_cache: RadianceCacheMITSUBA, 
         trainable_bsdf: mi.BSDF, 
         num_points: int,
-        num_wi: int):
+        num_wi: int, 
+        rng_state: int
+        ):
     '''
     Inputs:
         - scene_sampler: SceneSurfaceSampler. The scene sampler draws random points from the scene's surfaces.
@@ -176,9 +197,11 @@ def compute_loss(
     # TODO: we can further re-arrange the steps to cut down/consolidate kernel launches
     '''
     with dr.suspend_grad():
+        # Temp workaround. TODO: avoid initializing a new sampler at each iteration
+        sampler_rt: mi.Sampler = mi.load_dict({'type': 'independent'})
 
         # Sample `NUM_POINTS` different surface points
-        si, (delta_emitter_sample, delta_emitter_Li) = scene_sampler.sample(num_points)
+        si, (delta_emitter_sample, delta_emitter_Li) = scene_sampler.sample(num_points, sampler_rt, rng_state)
 
         # Evaluate RHS scene emitter contribution
         ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
@@ -186,18 +209,17 @@ def compute_loss(
         rhs = f_emitter * delta_emitter_Li
 
         # Evaluate LHS of balance equation
-        # Temp workaround. TODO: avoid initializing a new sampler at each iteration
         lhs = -radiance_cache.query_cached_Le(si)
 
-        sampler_rt: mi.Sampler = mi.load_dict({'type': 'independent'})
-        lhs += radiance_cache.query_cached_Lo(sampler_rt, si)
+        lhs += radiance_cache.query_cached_Lo(si, sampler_rt, rng_state)
 
         # Evaluate RHS integral
-        Li, wi_local, si_flattened = radiance_cache.query_cached_Li(sampler_rt, si, num_wi)
+        Li, wi_local, si_flattened = radiance_cache.query_cached_Li(si, num_wi, sampler_rt, rng_state)
 
         with dr.resume_grad():
             f_io = trainable_bsdf.eval(ctx, si = si_flattened, wo = wi_local)
             integrand = f_io * Li
+            # TODO: try removing block_reduce
             rhs += dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
 
             # print(f"term1:{rhs}")
