@@ -25,32 +25,41 @@ class SceneSurfaceSampler:
         self.shape_ptrs = shape_ptrs
         self.delta_emitters = [emitter for emitter in scene.emitters() if is_delta_emitter(emitter)]
 
-    def sample(self, num_points: int, sampler: mi.Sampler, rng_state: int = 0) -> mi.SurfaceInteraction3f:
+    def sample(self, num_points: int, sampler_rt: mi.Sampler, rng_state: int = 0) -> mi.SurfaceInteraction3f:
         '''
-        TODO
+        Inputs:
+            - num_points: int. Number of surface points to sample.
+            - sampler: Sampler. The pseudo-random number generator.
+            - rng_state: int. Seed for the PRNG.
+        Outputs: 
+            - si: SurfaceInteraction3f. Array of surface sample points of size [#si,].
+            - em_ds: DirectionSample3f. Direction sample records from the delta emitter -> surface samples, size [#si,].
+            - em_Li: mi.Color3f. Incident radiances from the delta emitter to the surface samples, size [#si,].
         '''
         # Generate `NUM_POINTS` different surface samples
-        # TODO: the seed value matters! Can we change the Sampler width without resetting the seed?
-        sampler.seed(rng_state, num_points)
-        idx = self.distribution.sample(sampler.next_1d(), True)
+        sampler_rt.seed(rng_state, num_points)
+        idx = self.distribution.sample(sampler_rt.next_1d(), True)
         shape = dr.gather(mi.ShapePtr, self.shape_ptrs, idx)
-        uv = sampler.next_2d()
+        uv = sampler_rt.next_2d()
         si = shape.eval_parameterization(uv, active=True)
-        # # TODO: the method below should give more uniform sampling, if we can get it to work
+        # # NOTE: the sampling method below might be more general
         # pos_sample = shape.sample_position(time=0.0, sample=sampler.next_2d())
         # si = mi.SurfaceInteraction3f(pos_sample, dr.zeros(mi.Color0f))
 
         # Generate one outgoing ray per surface sample
-        uv = sampler.next_2d()
+        uv = sampler_rt.next_2d()
         wo_local = mi.warp.square_to_cosine_hemisphere(uv)
         si.wi = wo_local
 
         # Compute the Li contribution from delta emitter sources
         # This can eventually be modified/extended to handle envmaps
-        point_light = self.delta_emitters[0]
-        # NOTE: sample `uv` is not actually used in the case of point lights
-        uv = sampler.next_2d()
-        return si, point_light.sample_direction(si, uv, True)
+        if len(self.delta_emitters) > 0:
+            point_light = self.delta_emitters[0]
+            # NOTE: sample `uv` is not actually used in the case of point lights
+            uv = sampler_rt.next_2d()
+            return si, point_light.sample_direction(si, uv, True)
+        else:
+            return si, dr.zeros(mi.DirectionSample3f), dr.zeros(mi.Color3f)
     
 class RadianceCacheMITSUBA:
     def __init__(self, scene: mi.Scene, spp_per_wo: int, spp_per_wi: int):
@@ -86,18 +95,8 @@ class RadianceCacheMITSUBA:
         # radiance.
         ray_flat_idxs = dr.repeat(dr.arange(UInt, num_points), self.spp_per_wo)    # contiguous order
         rays_flattened = dr.gather(mi.Ray3f, Lo_rays, ray_flat_idxs, mode = dr.ReduceMode.Direct)
-        sampler_rt.seed(rng_state + 0x1000, num_points * self.spp_per_wo)
+        sampler_rt.seed(rng_state + 0x0FFF_FFFF, num_points * self.spp_per_wo)
         colors, _, _ = self.integrator.sample(self.scene, sampler_rt, rays_flattened)
-        # colors, _, _, _ = self.integrator.sample(
-        #     dr.ADMode.Primal,
-        #     self.scene, 
-        #     sampler_rt, 
-        #     rays_flattened, 
-        #     depth=0,
-        #     δL=0,
-        #     δaovs=[],
-        #     state_in=[],
-        #     active=True)  # DEBUG
         Lo = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = self.spp_per_wo) / self.spp_per_wo
         return Lo
 
@@ -145,7 +144,7 @@ class RadianceCacheMITSUBA:
 
         # Compute the incident radiance on `A` for a direction, `wi`
         NUM_RAYS = num_points * num_wi
-        sampler_rt.seed(rng_state + 0x2000, NUM_RAYS)
+        sampler_rt.seed(rng_state + 2 * 0x0FFF_FFFF, NUM_RAYS)
         uv = sampler_rt.next_2d()
         wi_local = mi.warp.square_to_cosine_hemisphere(uv)
         wi_pdf   = mi.warp.square_to_cosine_hemisphere_pdf(wi_local)
@@ -156,20 +155,10 @@ class RadianceCacheMITSUBA:
         # different MC samples and average them to get the outgoing radiance.
         ray_flat_idxs = dr.repeat(dr.arange(UInt, NUM_RAYS), self.spp_per_wi)    # contiguous order
         rays_flattened = dr.gather(mi.Ray3f, wi_rays, ray_flat_idxs, mode = dr.ReduceMode.Local)
-        sampler_rt.seed(rng_state + 0x3000, NUM_RAYS * self.spp_per_wi)
+        sampler_rt.seed(rng_state + 3 * 0x0FFF_FFFF, NUM_RAYS * self.spp_per_wi)
         colors, _, _ = self.integrator.sample(self.scene, sampler_rt, rays_flattened)
-        # colors, _, _, _ = self.integrator.sample(
-        #     dr.ADMode.Primal,
-        #     self.scene, 
-        #     sampler_rt, 
-        #     rays_flattened, 
-        #     depth=1,
-        #     δL=0,
-        #     δaovs=[],
-        #     state_in=[],
-        #     active=True)  # DEBUG
         Li = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = self.spp_per_wi) / self.spp_per_wi
-        Li *= dr.rcp(wi_pdf)
+        Li = dr.select(wi_pdf > 0.0, Li * dr.rcp(wi_pdf), dr.zeros(mi.Color3f))
         return Li, wi_local, si_flattened
     
     def query_cached_Le(self, si: mi.SurfaceInteraction3f) -> mi.Color3f:
@@ -194,7 +183,7 @@ def compute_loss(
     Outputs:
         - loss: Float. The scalar loss.
     
-    # TODO: we can further re-arrange the steps to cut down/consolidate kernel launches
+    # NOTE: we might be able to further re-arrange the steps to cut down/consolidate kernel launches.
     '''
     with dr.suspend_grad():
         # Temp workaround. TODO: avoid initializing a new sampler at each iteration
@@ -205,8 +194,9 @@ def compute_loss(
 
         # Evaluate RHS scene emitter contribution
         ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
-        f_emitter = trainable_bsdf.eval(ctx, si, wo = si.to_local(delta_emitter_sample.d))
-        rhs = f_emitter * delta_emitter_Li
+        with dr.resume_grad():
+            f_emitter = trainable_bsdf.eval(ctx, si, wo = si.to_local(delta_emitter_sample.d))
+            rhs = f_emitter * delta_emitter_Li
 
         # Evaluate LHS of balance equation
         lhs = -radiance_cache.query_cached_Le(si)
@@ -219,13 +209,7 @@ def compute_loss(
         with dr.resume_grad():
             f_io = trainable_bsdf.eval(ctx, si = si_flattened, wo = wi_local)
             integrand = f_io * Li
-            # TODO: try removing block_reduce
             rhs += dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
-
-            # print(f"term1:{rhs}")
-
-        
-            # print(f"term2:{delta_emitter_Li}")
 
             # # # DEBUG
             # print(f"Li:{rhs}")

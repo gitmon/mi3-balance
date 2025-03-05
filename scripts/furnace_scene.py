@@ -31,7 +31,24 @@ def make_geometry(center, radius, color_ref) -> dict:
     }
     return geo_dict
 
-def make_textured_geometry(center, radius) -> dict:
+def make_geometry_disney(center, radius, color_ref, alpha_ref) -> dict:
+    geo_dict = {
+        "type": "sphere",
+        "center": [center[0], center[1], center[2]],
+        "radius": radius,
+        "flip_normals": True,
+        "bsdf": {
+            "type": "principled",
+            "base_color": {
+                "type": "rgb",
+                "value": color_ref
+            },
+        "roughness": alpha_ref,
+        }
+    }
+    return geo_dict
+
+def make_textured_geometry(center, radius, texture_path: str = "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/carrot.png") -> dict:
     geo_dict = {
         "type": "sphere",
         "center": [center[0], center[1], center[2]],
@@ -41,11 +58,7 @@ def make_textured_geometry(center, radius) -> dict:
             "type": "diffuse",
             "reflectance": {
                 "type": "bitmap",
-                # "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/floor_tiles.jpg"
-                # "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/leaf_mask.png"
-                "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/carrot.png",
-                # "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/noise_02.png"
-                # "filename": "/home/jonathan/Documents/mi3-balance/resources/data/common/textures/museum.exr"
+                "filename": texture_path,
                 "filter_type": "nearest",
                 "raw": True
             }
@@ -56,7 +69,7 @@ def make_textured_geometry(center, radius) -> dict:
 def make_emitter(center, emitter_intensity) -> dict:
     emitter_dict = {
         "type": "point",
-        "position": [center[0], center[1], center[2] + 0.4],
+        "position": [center[0], center[1], center[2]],
         "intensity": {
             "type": "uniform",
             "value": emitter_intensity,
@@ -85,15 +98,43 @@ def make_sensor(spp: int = 32) -> dict:
     return camera
 
 
-def make_scene(color_ref = BSDF_COLOR_REF, use_texture = False):
+def make_scene_uniform(color_ref = BSDF_COLOR_REF):
     scene_dict = {
         "type": "scene",
         "myintegrator": {
             "type": "path",
             "max_depth": 10 # 5
         },
-        "mysphere": make_textured_geometry(GEO_CENTER, GEO_RADIUS) if use_texture else make_geometry(GEO_CENTER, GEO_RADIUS, color_ref),
-        "myemitter": make_emitter(GEO_CENTER, EMITTER_INTENSITY),
+        "mysphere": make_geometry(GEO_CENTER, GEO_RADIUS, color_ref),
+        "myemitter": make_emitter([GEO_CENTER[0], GEO_CENTER[1], GEO_CENTER[2] + 0.4], EMITTER_INTENSITY),
+        "mysensor": make_sensor(SENSOR_SPP),
+    }
+    scene = mi.load_dict(scene_dict)
+    return scene
+
+def make_scene_disney(color_ref, alpha_ref):
+    scene_dict = {
+        "type": "scene",
+        "myintegrator": {
+            "type": "path",
+            "max_depth": 10 # 5
+        },
+        "mysphere": make_geometry_disney(GEO_CENTER, GEO_RADIUS, color_ref, alpha_ref),
+        "myemitter": make_emitter([GEO_CENTER[0], GEO_CENTER[1], GEO_CENTER[2] + 0.4], EMITTER_INTENSITY),
+        "mysensor": make_sensor(SENSOR_SPP),
+    }
+    scene = mi.load_dict(scene_dict)
+    return scene
+
+def make_scene_textured(texture_path: str):
+    scene_dict = {
+        "type": "scene",
+        "myintegrator": {
+            "type": "path",
+            "max_depth": 15 # 5
+        },
+        "mysphere": make_textured_geometry(GEO_CENTER, GEO_RADIUS, texture_path),
+        "myemitter": make_emitter([GEO_CENTER[0], GEO_CENTER[1], GEO_CENTER[2] + 0.4], EMITTER_INTENSITY),
         "mysensor": make_sensor(SENSOR_SPP),
     }
     scene = mi.load_dict(scene_dict)
@@ -117,4 +158,4 @@ def visualize_scene(sph_center, sph_radius, emitter_center, probe_origins, probe
     ps.show()
 
 if __name__ == "__main__":
-    make_scene()
+    make_scene_uniform()
