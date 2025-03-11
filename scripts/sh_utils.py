@@ -104,21 +104,93 @@ def eval_basis(max_order: int, N: int = 256) -> tuple[mi.Vector3f, list[Float], 
             is a Float of size [N*N,].
         - W: Float. Quadrature weights matrix of size [N*N,].
     '''
-    nodes, weights = mi.quad.composite_simpson(N + 1)
-    us, vs = dr.meshgrid(nodes, nodes)
-    Nw = dr.width(weights)
-    W = dr.gather(type(weights), weights, dr.tile(dr.arange(UInt, Nw), Nw))
-    W *= dr.gather(type(W), weights, dr.repeat(dr.arange(UInt, Nw), Nw))
+    nodes_theta, weights_theta = mi.quad.composite_simpson(N // 2 + 1)
+    nodes_phi, weights_phi = mi.quad.composite_simpson(N + 1)
+    us, vs = dr.meshgrid(nodes_theta, nodes_phi)
+    Nt = dr.width(weights_theta)
+    Np = dr.width(weights_phi)
+    W = dr.gather(type(weights_theta), weights_theta, dr.tile(dr.arange(UInt, Nt), Np))
+    W *= dr.gather(type(W), weights_phi, dr.repeat(dr.arange(UInt, Np), Nt))
     thetas = 0.5 * dr.pi * (us + 1.0)
     phis = dr.pi * (vs + 1.0)
-    d = mi.Vector3f(
-        dr.sin(thetas) * dr.cos(phis),
-        dr.sin(thetas) * dr.sin(phis),
-        dr.cos(thetas))
+    st, ct = dr.sincos(thetas)
+    sp, cp = dr.sincos(phis)
+    d = mi.Vector3f(st * cp, st * sp, ct)
 
     sh_basis = dr.sh_eval(d, max_order)
     # absorb Jacobian term into quadrature weights "matrix"
     W *=  0.5 * dr.square(dr.pi) * dr.sin(thetas)
+    return d, sh_basis, W
+
+def eval_basis_on_hemisphere(max_order: int, N: int = 256) -> tuple[mi.Vector3f, list[Float], Float]:
+    '''
+    Variant of `eval_basis()` where we expect to evaluate a spherical function in the upper 
+    hemisphere only. This is needed to fit *hemispheric* functions such as radiance caches
+    or BRDFs; we essentially reflect the target function across the z-axis to yield a full 
+    spherical function, and then compute its integral with the harmonic basis functions as 
+    per usual.
+
+    Inputs:
+        - max_order: int. The maximum SH degree to evaluate.
+        - N: int. The number of directions to evaluate __per spherical angle__ (\theta, \phi). 
+            A total of N*N directions will be queried to cover the full unit sphere.
+
+    Outputs:
+        - d: mi.Vector3f. Directions in which the SH basis functions are evaluated, size [3, N*N].
+        - sh_basis: list[Float]. Evaluations of the SH basis functions in the directions `d`. The list
+            contains `(max_order + 1) ** 2` entries -- one per basis function -- and each entry
+            is a Float of size [N*N,].
+        - W: Float. Quadrature weights matrix of size [N*N,].
+    '''
+    nodes_theta, weights_theta = mi.quad.composite_simpson(N // 2 + 1)
+    nodes_phi, weights_phi = mi.quad.composite_simpson(N + 1)
+    us, vs = dr.meshgrid(nodes_theta, nodes_phi)
+    Nt = dr.width(weights_theta)
+    Np = dr.width(weights_phi)
+    W = dr.gather(type(weights_theta), weights_theta, dr.tile(dr.arange(UInt, Nt), Np))
+    W *= dr.gather(type(W), weights_phi, dr.repeat(dr.arange(UInt, Np), Nt))
+    thetas = 0.5 * dr.pi * (us + 1.0)
+    phis = dr.pi * (vs + 1.0)
+    st, ct = dr.sincos(thetas)
+    sp, cp = dr.sincos(phis)
+    # Force the integrand-evaluated `z` directions into the upper hemisphere
+    d = mi.Vector3f(st * cp, st * sp, dr.abs(ct))
+
+    sh_basis = dr.sh_eval(d, max_order)
+    # absorb Jacobian term into quadrature weights "matrix"
+    W *=  0.5 * dr.square(dr.pi) * dr.sin(thetas)
+    return d, sh_basis, W
+
+def eval_basis_hemisphere_only(max_order: int, N: int = 256) -> tuple[mi.Vector3f, list[Float], Float]:
+    '''
+    Inputs:
+        - max_order: int. The maximum SH degree to evaluate.
+        - N: int. The number of directions to evaluate __per spherical angle__ (\theta, \phi). 
+            A total of N*N directions will be queried to cover the full unit sphere.
+
+    Outputs:
+        - d: mi.Vector3f. Directions in which the SH basis functions are evaluated, size [3, N*N].
+        - sh_basis: list[Float]. Evaluations of the SH basis functions in the directions `d`. The list
+            contains `(max_order + 1) ** 2` entries -- one per basis function -- and each entry
+            is a Float of size [N*N,].
+        - W: Float. Quadrature weights matrix of size [N*N,].
+    '''
+    nodes_theta, weights_theta = mi.quad.composite_simpson(N // 4 + 1)
+    nodes_phi, weights_phi = mi.quad.composite_simpson(N + 1)
+    us, vs = dr.meshgrid(nodes_theta, nodes_phi)
+    Nt = dr.width(weights_theta)
+    Np = dr.width(weights_phi)
+    W = dr.gather(type(weights_theta), weights_theta, dr.tile(dr.arange(UInt, Nt), Np))
+    W *= dr.gather(type(W), weights_phi, dr.repeat(dr.arange(UInt, Np), Nt))
+    thetas = 0.25 * dr.pi * (us + 1.0)
+    phis = dr.pi * (vs + 1.0)
+    st, ct = dr.sincos(thetas)
+    sp, cp = dr.sincos(phis)
+    d = mi.Vector3f(st * cp, st * sp, ct)
+
+    sh_basis = dr.sh_eval(d, max_order)
+    # absorb Jacobian term into quadrature weights "matrix"
+    W *=  0.25 * dr.square(dr.pi) * dr.sin(thetas)
     return d, sh_basis, W
 
 def fit_sh_coeffs_scalar(f_scalar, max_order: int, N: int = 64) -> ArrayXf:

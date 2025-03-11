@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from drjit.auto import Float, UInt
 
-from spherical_harmonics import get_sh_count, get_sh_order_from_index, spherical_integrate
+from sh_utils import get_sh_count, get_sh_order_from_index, spherical_integrate
 
 def eval_envmap(envmap: mi.Emitter, d: mi.Vector3f, scale = None, Lmax = None):
     si = dr.zeros(mi.SurfaceInteraction3f, dr.width(d))
@@ -109,7 +109,7 @@ def test_spherical_integrate_env(index: int, Ns = [16, 32, 64, 128, 256, 512, 10
     plt.legend()
 
 
-from spherical_harmonics import fit_sh_coeffs_color, eval_sh_coeffs_color_on_sphere, eval_sh_coeffs_color_for_direction
+from scripts.sh_utils import fit_sh_coeffs_color, eval_sh_coeffs_color_on_sphere, eval_sh_coeffs_color_for_direction
 import polyscope as ps
 
 def test_fit_sh(max_order: int):
