@@ -7,13 +7,18 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from gpytoolbox import per_vertex_normals
 
-from sh_utils import eval_basis, get_sh_count
+from sh_utils import eval_basis, eval_basis_on_hemisphere, get_sh_count
 
 def fit_sh_on_mesh_vertex(scene: mi.Scene, mesh_idx: int, mesh_vtx_idx: int, max_order: int, Nquad: int, spp: int = 64):
+    '''
+    Scalar version of the SH fitting algorithm; it computes the SH coefficients at one vertex (id: `mesh_vtx_idx`) of
+    one mesh (id: `mesh_idx`) in the scene.
+    '''
     # Load data from scene
     integrator = scene.integrator()
-    meshes = [shape for shape in scene.shapes() if shape.is_mesh()]
-    mesh = meshes[mesh_idx]
+    mesh = scene.shapes()[mesh_idx]
+    if not(mesh.is_mesh()):
+        raise KeyError(f"Shape at index {mesh_idx} is not a triangle mesh!")
 
     # Initialize interaction structs at each of the mesh vertices
     positions = dr.gather(mi.Point3f, dr.unravel(mi.Point3f, mesh.vertex_positions_buffer()), mesh_vtx_idx)
@@ -58,73 +63,24 @@ def fit_sh_on_mesh_vertex(scene: mi.Scene, mesh_idx: int, mesh_vtx_idx: int, max
             buffer=dr.ravel(Lo_coeff))
     sh_color = dr.clip(sh_color, 0.0, 1.0)
 
-    plt.figure(figsize=(12,7))
+    def hideaxis():
+        plt.tick_params(
+            axis='both', which='both',
+            # bottom=False, top=False,
+            # left=False, right=False,
+            labelbottom=False,
+            labelleft=False)
+
+    plt.figure(figsize=(12,7), dpi=200)
     plt.subplot(211); plt.title("Reference")
     plt.imshow(mi.TensorXf(Lo_per_d).numpy().reshape(3,Nquad+1, -1).swapaxes(0,2))
+    hideaxis()
+    plt.xlabel(r"$\phi$"), plt.ylabel(r"$\theta$")
     plt.subplot(212); plt.title(f"Spherical harmonics fit (degree = {max_order})")
     plt.imshow(mi.TensorXf(sh_color).numpy().reshape(3,Nquad+1, -1).swapaxes(0,2))
+    plt.xlabel(r"$\phi$"), plt.ylabel(r"$\theta$")
+    hideaxis()
     plt.tight_layout()
-
-
-def fit_sh_on_mesh_unbatched(integrator: mi.Integrator, mesh: mi.Mesh, max_order: int, Nquad: int = 64, spp: int = 32, seed: int = 0):
-    Nv = mesh.vertex_count()
-    # Initialize interaction structs at each of the mesh vertices
-    positions = dr.unravel(mi.Point3f, mesh.vertex_positions_buffer())
-    normals = dr.unravel(mi.Vector3f, mesh.vertex_normals_buffer())
-    # positions += mi.math.RayEpsilon * normals
-    si = dr.zeros(mi.SurfaceInteraction3f, Nv)
-    si.p, si.n = positions, normals
-    si.sh_frame = mi.Frame3f(normals)
-
-    # evaluate SH basis
-    d, sh_basis, quad_W = eval_basis(max_order, Nquad)
-    dirs_per_point = dr.width(d)
-
-    # Split computation into batches if needed?
-    MAX_RAYS_PER_BATCH = 1 << 29
-    total_rays = Nv * dirs_per_point * spp
-    print(f"Nv = {Nv}, Nrays = {total_rays}")
-    ray_batch_size = total_rays
-    num_batches = (total_rays + MAX_RAYS_PER_BATCH) // MAX_RAYS_PER_BATCH
-    if num_batches > 1:
-        raise NotImplementedError()
-    
-    # Trace and aggregate rays
-    si_wide = dr.gather(type(si), si, dr.repeat(dr.arange(UInt, Nv), spp * dirs_per_point))
-    d_wide = dr.gather(type(d), d, dr.tile(dr.repeat(dr.arange(UInt, dirs_per_point), spp), Nv))
-    si_wide.wi = d_wide
-
-    sampler = mi.load_dict({'type': 'independent'})
-    sampler.seed(seed, ray_batch_size)
-    # measure radiance from position `d` towards `si.p`
-    rays = si_wide.spawn_ray(si_wide.to_world(d_wide))
-    rays.d = -rays.d
-    colors_Lo, _, _ = integrator.sample(scene, sampler, rays)
-    Lo_per_d = dr.block_reduce(dr.ReduceOp.Add, colors_Lo, spp) / spp
-
-    if mesh.is_emitter():
-        # redundant computation, Le is sampled `spp` times but is always the same
-        colors_Le = mesh.emitter().eval(si_wide)
-        Le_per_d = dr.block_reduce(dr.ReduceOp.Add, colors_Le, spp) / spp
-
-    idx2 = dr.tile(dr.arange(UInt, dirs_per_point), Nv)
-    quadW_wide = dr.gather(type(quad_W), quad_W, idx2)
-    sh_basis_wide = dr.gather(type(sh_basis), sh_basis, idx2)
-
-    for sh_id, basis_wide in enumerate(sh_basis_wide):
-        Lo_coeff = dr.block_reduce(dr.ReduceOp.Add, quadW_wide * basis_wide * Lo_per_d, block_size = dirs_per_point)
-        mesh.add_attribute(
-            name=f"vertex_Lo_coeffs_{sh_id}",
-            size=3,
-            buffer=dr.ravel(Lo_coeff))
-        
-    if mesh.is_emitter():
-        for sh_id, basis_wide in enumerate(sh_basis_wide):
-            Le_coeff = dr.block_reduce(dr.ReduceOp.Add, quadW_wide * basis_wide * Le_per_d, block_size = dirs_per_point)
-            mesh.add_attribute(
-                name=f"vertex_Le_coeffs_{sh_id}",
-                size=3,
-                buffer=dr.ravel(Le_coeff))
 
 
 def fit_sh_on_mesh_batched(scene: mi.Scene, mesh: mi.Mesh, max_order: int, Nquad: int = 64, spp: int = 32, seed: int = 0):
@@ -143,8 +99,8 @@ def fit_sh_on_mesh_batched(scene: mi.Scene, mesh: mi.Mesh, max_order: int, Nquad
     si.sh_frame = mi.Frame3f(normals)
 
     # evaluate SH basis
-    # d, sh_basis, quad_W = eval_basis_on_hemisphere(max_order, Nquad)
     d, sh_basis, quad_W = eval_basis(max_order, Nquad)
+    # d, sh_basis, quad_W = eval_basis_on_hemisphere(max_order, Nquad)
     dirs_per_point = dr.width(d)
 
     # Split computation into batches if needed?
@@ -182,7 +138,7 @@ def fit_sh_on_mesh_batched(scene: mi.Scene, mesh: mi.Mesh, max_order: int, Nquad
         Lo_per_d = dr.block_reduce(dr.ReduceOp.Add, colors_Lo, spp) / spp
 
         if mesh.is_emitter():
-            # redundant computation, Le is sampled `spp` times but is always the same
+            # NOTE/TODO: redundant computation, Le is sampled `spp` times but is always the same
             colors_Le = mesh.emitter().eval(si_wide)
             Le_per_d = dr.block_reduce(dr.ReduceOp.Add, colors_Le, spp) / spp
 
@@ -231,23 +187,25 @@ def fit_sh_on_mesh_batched(scene: mi.Scene, mesh: mi.Mesh, max_order: int, Nquad
             buffer=dr.ravel(Le_coeffs))
 
 
-def fit_sh_on_scene(scene: mi.Scene, max_order: int):
+def fit_sh_on_scene(scene: mi.Scene, max_order: int, Nquad: int = 128, spp: int = 64):
     meshes = [shape for shape in scene.shapes() if shape.is_mesh()]
     for idx, mesh in enumerate(tqdm(meshes)):
-        fit_sh_on_mesh_batched(scene, mesh, max_order, Nquad=32*4, spp=32*2, seed=idx)     # matpreview, 30s
+        fit_sh_on_mesh_batched(scene, mesh, max_order, Nquad, spp, seed=idx)
 
 
-def render_scene(scene: mi.Scene, max_order: int):
+def render_scene(scene: mi.Scene, max_order: int, rays: mi.Ray3f = None):
     # Render scene
-    film_size = scene.sensors()[0].film().size()
-    img_res = (film_size[0], film_size[1])
-    us, vs = dr.meshgrid(dr.linspace(Float, 0.0, 1.0, img_res[0]), dr.linspace(Float, 0.0, 1.0, img_res[1]))
-    sensor = scene.sensors()[0]
-    ray, _ = sensor.sample_ray(0.0, 0.0, mi.Point2f(us, vs), dr.zeros(mi.Point2f))
-    si = scene.ray_intersect(ray)
+    img_res = (None, None)
+    if rays is None:
+        film_size = scene.sensors()[0].film().size()
+        img_res = (film_size[0], film_size[1])
+        us, vs = dr.meshgrid(dr.linspace(Float, 0.0, 1.0, img_res[0]), dr.linspace(Float, 0.0, 1.0, img_res[1]))
+        sensor = scene.sensors()[0]
+        rays, _ = sensor.sample_ray(0.0, 0.0, mi.Point2f(us, vs), dr.zeros(mi.Point2f))
+    si = scene.ray_intersect(rays)
     mesh = si.shape
 
-    color = dr.zeros(mi.Color3f, dr.width(us))
+    color = dr.zeros(mi.Color3f, dr.width(rays))
     for sh_id, basis in enumerate(dr.sh_eval(si.wi, max_order)):
         # `Lo` already includes the emittance of the surface
         # color += dr.select(mesh.is_emitter(), 
@@ -259,17 +217,51 @@ def render_scene(scene: mi.Scene, max_order: int):
 
     # out = mi.TensorXf(dr.select(mesh == meshes[4], 0.0, 1.0), shape=img_res)
 
-    # TODO: find out how to plot mi.Color3f images
-    out = np.stack((
-        mi.TensorXf(color.x, shape=(img_res[1], img_res[0])).numpy().T,
-        mi.TensorXf(color.y, shape=(img_res[1], img_res[0])).numpy().T,
-        mi.TensorXf(color.z, shape=(img_res[1], img_res[0])).numpy().T)).swapaxes(0,2)
+    return color, img_res
 
-    plt.figure(figsize=(18,10)); 
-    plt.subplot(131); plt.imshow(mi.render(scene)); plt.title("Reference")
-    prim = mi.render(scene, integrator = mi.load_dict({'type': 'aov', 'aovs': 'dd.y:prim_index'}))
-    plt.subplot(132); plt.imshow(prim.numpy().astype('int') % 10); plt.title("Triangles")
-    plt.subplot(133); plt.imshow(out); plt.title("Radiance cache")
-    plt.tight_layout()
+import polyscope as ps
+from visualizer import plot_mesh, plot_mesh_attributes, camera_to_mi
 
-    return color
+def visualize_fit(scene: mi.Scene, max_order: int):
+    meshes = [shape for shape in scene.shapes() if shape.is_mesh()]
+
+    ps.init()
+
+    params = mi.traverse(scene)
+    # params['camera.to_world'] = camera_to_mi()
+    params['PerspectiveCamera.to_world'] = camera_to_mi()
+    params.update()
+    image, img_res = render_scene(scene, max_order)
+
+    image_out = np.stack((
+        mi.TensorXf(image.x, shape=(img_res[1], img_res[0])).numpy().T,
+        mi.TensorXf(image.y, shape=(img_res[1], img_res[0])).numpy().T,
+        mi.TensorXf(image.z, shape=(img_res[1], img_res[0])).numpy().T), axis=2)
+
+    ps.add_color_image_quantity("Image", image_out, enabled=True, show_fullscreen=True)
+
+    def callback():
+        # params['camera.to_world'] = camera_to_mi()
+        params['PerspectiveCamera.to_world'] = camera_to_mi()
+        params.update()
+        image, img_res = render_scene(scene, max_order)
+
+        image_out = np.stack((
+            mi.TensorXf(image.x, shape=(img_res[1], img_res[0])).numpy().T,
+            mi.TensorXf(image.y, shape=(img_res[1], img_res[0])).numpy().T,
+            mi.TensorXf(image.z, shape=(img_res[1], img_res[0])).numpy().T), axis=2)
+
+        ps.add_color_image_quantity("Image", image_out)
+
+    ps.set_user_callback(callback)
+
+    for idx, mesh in enumerate(meshes):
+        keys = [f"vertex_Lo_coeffs_{sh_id}" for sh_id in range(get_sh_count(max_order))]
+        if mesh.is_emitter():
+            keys += [f"vertex_Le_coeffs_{sh_id}" for sh_id in range(get_sh_count(max_order))]
+        
+        # plot_mesh(mesh, f"mesh{idx}")
+        plot_mesh_attributes(mesh, f"mesh{idx}", keys, is_color=True)
+
+    ps.show()
+    ps.clear_user_callback()

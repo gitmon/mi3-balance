@@ -433,6 +433,12 @@ def bsdf_sample(
 # Main BSDF class
 
 class Principled:
+    '''
+    Duplicate implementation of the principled BSDF which allows material parameters to be queried from the 
+    _vertex attributes_ of a mesh, rather than via texture lookups. This is needed to render and optimize
+    materials on meshes don't have a global UV parameterization, e.g. those which are produced from 
+    automated/algorithmic generation pipelines.
+    '''
     def __init__(self, 
                  has_metallic: bool = True, 
                  has_anisotropic: bool = False, 
@@ -461,18 +467,41 @@ class Principled:
             m_roughness: float,
             m_metallic: float = None, 
             m_anisotropic: float = None,
-            m_spec_tint: float = None) -> None:
+            m_spec_tint: float = None) -> list[str]:
+        '''
+        On a given input triangle mesh, initialize vertex attribute buffers for each of the optimizable 
+        BSDF parameters.
+        Input:
+            - mesh: mi.Mesh. The mesh whose material properties are to be optimized.
+            - m_base_color: list[float], size (3,). The initialization value for the mesh's base color.
+            - m_roughness, m_metallic, 
+              m_anisotropic, m_spec_tint: float. The initialization values for the other scalar parameters
+              in the principled BSDF.
+
+        Returns:
+            - param_keys: list[str]. List of mesh attribute names corresponding to the BSDF parameters.
+        '''
         Nv = mesh.vertex_count()
         color = mi.Color3f([float(x) for x in m_base_color])
         vertex_colors = dr.gather(mi.Color3f, color, dr.zeros(UInt, Nv))
+
+        param_keys = []
+
         mesh.add_attribute("vertex_bsdf_base_color", 3, dr.ravel(vertex_colors))
         mesh.add_attribute("vertex_bsdf_roughness", 1, dr.full(Float, m_roughness, Nv))
+        param_keys.append("vertex_bsdf_base_color")
+        param_keys.append("vertex_bsdf_roughness")
         if self.has_metallic:
             assert m_metallic is not None, "`m_metallic` is not set!"
             mesh.add_attribute("vertex_bsdf_metallic", 1, dr.full(Float, m_metallic, Nv))
+            param_keys.append("vertex_bsdf_metallic")
         if self.has_anisotropic:
             assert m_anisotropic is not None, "`m_anisotropic` is not set!"
             mesh.add_attribute("vertex_bsdf_anisotropic", 1, dr.full(Float, m_anisotropic, Nv))
+            param_keys.append("vertex_bsdf_anisotropic")
         if self.has_spec_tint:
             assert m_spec_tint is not None, "`m_spec_tint` is not set!"
             mesh.add_attribute("vertex_bsdf_spec_tint", 1, dr.full(Float, m_spec_tint, Nv))
+            param_keys.append("vertex_bsdf_spec_tint")
+
+        return param_keys

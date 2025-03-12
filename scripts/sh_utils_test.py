@@ -109,10 +109,17 @@ def test_spherical_integrate_env(index: int, Ns = [16, 32, 64, 128, 256, 512, 10
     plt.legend()
 
 
-from scripts.sh_utils import fit_sh_coeffs_color, eval_sh_coeffs_color_on_sphere, eval_sh_coeffs_color_for_direction
+from sh_utils import fit_sh_coeffs_color, eval_sh_coeffs_color_on_sphere, eval_sh_coeffs_color_for_direction
 import polyscope as ps
 
 def test_fit_sh(max_order: int):
+    '''
+    Fit spherical harmonics coefficients to a target function that is *defined* as the sum of 
+    several SH basis functions. The fitted coefficients should exactly match those of the 
+    original function.
+    Inputs:
+        - max_order: int. Maximum SH degree to use in the fit _and_ the target function.
+    '''
     # Randomly generate a spherical function using the leading SH basis functions
     num_coeffs = get_sh_count(max_order)
     sampler = mi.load_dict({'type':'independent'})
@@ -150,6 +157,11 @@ def test_fit_sh(max_order: int):
     ps.show()
 
 def test_fit_envmap(max_order: int):
+    '''
+    Fit spherical harmonics coefficients to an input envmap.
+    Input:
+        - max_order: int. Maximum SH degree to use in the fit.
+    '''
     home_dir = "/home/jonathan/Documents/mi3-balance/scripts/resources/envmaps/"
     # envmap_fp, scale, Lmax = "rosendal_park_sunset_puresky_1k.exr", 0.1, 5.0
     # envmap_fp, scale, Lmax = "lilienstein_1k.exr", 1.0, 5.0
