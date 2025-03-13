@@ -152,7 +152,7 @@ def bsdf_eval(
 
     # Eta value w.r.t. ray instead of the object.
     eta_path     = dr.select(front_side, m_eta, inv_eta)
-    inv_eta_path = dr.select(front_side, inv_eta, m_eta)
+    # inv_eta_path = dr.select(front_side, inv_eta, m_eta)
 
     # Main specular reflection and transmission lobe
 
@@ -451,13 +451,13 @@ class Principled:
         self.spec_srate = 1.0
         self.diff_refl_srate = 1.0
 
-    def sample(self, si: mi.SurfaceInteraction3f, sample1: Float, sample2: mi.Point2f, active: Bool) -> tuple[mi.BSDFSample3f, mi.Color3f]:
+    def sample(self, ctx: mi.BSDFContext, si: mi.SurfaceInteraction3f, sample1: Float, sample2: mi.Point2f, active: Bool = True) -> tuple[mi.BSDFSample3f, mi.Color3f]:
         return bsdf_sample(si, sample1, sample2, active, self.specular, self.has_anisotropic, self.has_metallic, self.has_spec_tint)
     
-    def eval(self, si: mi.SurfaceInteraction3f, wo: mi.Vector3f, active: Bool) -> mi.Color3f:
+    def eval(self, ctx: mi.BSDFContext, si: mi.SurfaceInteraction3f, wo: mi.Vector3f, active: Bool = True) -> mi.Color3f:
         return bsdf_eval(si, wo, active, self.specular, self.has_anisotropic, self.has_metallic, self.has_spec_tint)
 
-    def pdf(self, si: mi.SurfaceInteraction3f, wo: mi.Vector3f, active: Bool) -> Float:
+    def pdf(self, ctx: mi.BSDFContext, si: mi.SurfaceInteraction3f, wo: mi.Vector3f, active: Bool = True) -> Float:
         return bsdf_pdf(si, wo, active, self.specular, self.has_anisotropic, self.has_metallic, self.spec_srate, self.diff_refl_srate)
 
     def initialize_mesh_attributes(
@@ -505,3 +505,70 @@ class Principled:
             param_keys.append("vertex_bsdf_spec_tint")
 
         return param_keys
+
+
+class Diffuse:
+    def __init__(self):
+        pass
+
+    def sample(self, ctx: mi.BSDFContext, si: mi.SurfaceInteraction3f, sample1: Float, sample2: mi.Point2f, active: Bool = True) -> tuple[mi.BSDFSample3f, mi.Color3f]:
+        cos_theta_i = mi.Frame3f.cos_theta(si.wi)
+        bs = dr.zeros(mi.BSDFSample3f)
+
+        active &= cos_theta_i > 0.0
+        if dr.none(active):
+            return bs, 0.0
+
+        bs.wo  = mi.warp.square_to_cosine_hemisphere(sample2)
+        bs.pdf = mi.warp.square_to_cosine_hemisphere_pdf(bs.wo)
+        bs.eta = 1.0
+        bs.sampled_type = +mi.BSDFFlags.DiffuseReflection
+        bs.sampled_component = 0
+
+        value = eval_base_color(si.shape, si, active)
+
+        return bs, dr.select(active & (bs.pdf > 0.0), value, 0.0)
+    
+    def eval(self, ctx: mi.BSDFContext, si: mi.SurfaceInteraction3f, wo: mi.Vector3f, active: Bool = True) -> mi.Color3f:
+        cos_theta_i = mi.Frame3f.cos_theta(si.wi)
+        cos_theta_o = mi.Frame3f.cos_theta(wo)
+
+        active &= (cos_theta_i > 0.0) & (cos_theta_o > 0.0)
+
+        active &= si.shape.is_mesh()
+        value = eval_base_color(si.shape, si, active) * dr.inv_pi * cos_theta_o
+
+        return dr.select(active, value, 0.0)
+
+    def pdf(self, ctx: mi.BSDFContext, si: mi.SurfaceInteraction3f, wo: mi.Vector3f, active: Bool = True) -> Float:
+        cos_theta_i = mi.Frame3f.cos_theta(si.wi)
+        cos_theta_o = mi.Frame3f.cos_theta(wo)
+
+        pdf = mi.warp.square_to_cosine_hemisphere_pdf(wo)
+
+        return dr.select((cos_theta_i > 0.0) & (cos_theta_o > 0.0), pdf, 0.0)
+
+
+
+
+import polyscope as ps
+from visualizer import plot_mesh_attributes
+
+def visualize_textures(scene: mi.Scene):
+    meshes = [shape for shape in scene.shapes() if shape.is_mesh()]
+
+    ps.init()
+
+    bsdf_keys = [
+        'vertex_bsdf_base_color',
+        'vertex_bsdf_roughness',
+        'vertex_bsdf_metallic',
+        'vertex_bsdf_anisotropic',
+        'vertex_bsdf_spec_tint',
+        ]
+    for idx, mesh in enumerate(meshes):
+        keys = [key for key in bsdf_keys if mesh.has_attribute(key)]
+        plot_mesh_attributes(mesh, f"mesh{idx}", keys, is_color=True)
+
+    ps.show()
+    ps.clear_user_callback()

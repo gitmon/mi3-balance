@@ -57,7 +57,7 @@ class SceneSurfaceSampler:
             point_light = self.delta_emitters[0]
             # NOTE: sample `uv` is not actually used in the case of point lights
             uv = sampler_rt.next_2d()
-            return si, point_light.sample_direction(si, uv, True)
+            return si, *point_light.sample_direction(si, uv, True)
         else:
             return si, dr.zeros(mi.DirectionSample3f), dr.zeros(mi.Color3f)
     
@@ -162,8 +162,9 @@ class RadianceCacheMITSUBA:
         return Li, wi_local, si_flattened
     
     def query_cached_Le(self, si: mi.SurfaceInteraction3f) -> mi.Color3f:
-        # wo_local = si.wi
-        return dr.zeros(mi.Color3f, dr.width(si))
+        mesh = si.shape
+        return dr.select(mesh.is_emitter(), mesh.emitter().eval(si), dr.zeros(mi.Color3f))
+    
 
 def compute_loss(
         scene_sampler: SceneSurfaceSampler, 
@@ -190,7 +191,7 @@ def compute_loss(
         sampler_rt: mi.Sampler = mi.load_dict({'type': 'independent'})
 
         # Sample `NUM_POINTS` different surface points
-        si, (delta_emitter_sample, delta_emitter_Li) = scene_sampler.sample(num_points, sampler_rt, rng_state)
+        si, delta_emitter_sample, delta_emitter_Li = scene_sampler.sample(num_points, sampler_rt, rng_state)
 
         # Evaluate RHS scene emitter contribution
         ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)

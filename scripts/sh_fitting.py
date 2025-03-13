@@ -238,7 +238,7 @@ def visualize_fit(scene: mi.Scene, max_order: int):
         mi.TensorXf(image.y, shape=(img_res[1], img_res[0])).numpy().T,
         mi.TensorXf(image.z, shape=(img_res[1], img_res[0])).numpy().T), axis=2)
 
-    ps.add_color_image_quantity("Image", image_out, enabled=True, show_fullscreen=True)
+    ps.add_color_image_quantity("Image", image_out ** (1.0 / 2.2), enabled=True, show_fullscreen=True)
 
     def callback():
         # params['camera.to_world'] = camera_to_mi()
@@ -251,7 +251,7 @@ def visualize_fit(scene: mi.Scene, max_order: int):
             mi.TensorXf(image.y, shape=(img_res[1], img_res[0])).numpy().T,
             mi.TensorXf(image.z, shape=(img_res[1], img_res[0])).numpy().T), axis=2)
 
-        ps.add_color_image_quantity("Image", image_out)
+        ps.add_color_image_quantity("Image", image_out ** (1.0 / 2.2))
 
     ps.set_user_callback(callback)
 

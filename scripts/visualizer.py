@@ -44,7 +44,7 @@ def plot_mesh_attributes(mesh: mi.Mesh, mesh_label: str, attrib_names: list[str]
             m.add_scalar_quantity(attrib_label, values, defined_on=domain, enabled=False)
         elif attrib_size == 3:
             if is_color:
-                m.add_color_quantity(attrib_label, values.reshape(-1,3), defined_on=domain, enabled=False)
+                m.add_color_quantity(attrib_label, values.reshape(-1,3), defined_on=domain, enabled=True)
             else:
                 m.add_vector_quantity(attrib_label, values.reshape(-1,3), defined_on=domain, enabled=False)
         else:
