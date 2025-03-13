@@ -232,6 +232,10 @@ public:
                                      const Point2f &sample,
                                      Mask active = true) const override;
 
+    SurfaceInteraction3f sample_surface_interaction(Float time,
+                                                    const Point2f &sample,
+                                                    Mask active = true) const override;
+
     Float pdf_position(const PositionSample3f &ps, Mask active = true) const override;
 
     Point3f barycentric_coordinates(const SurfaceInteraction3f &si,

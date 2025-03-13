@@ -256,6 +256,9 @@ public:
     virtual PositionSample3f sample_position(Float time, const Point2f &sample,
                                              Mask active = true) const;
 
+    virtual SurfaceInteraction3f sample_surface_interaction(Float time, const Point2f &sample,
+                                             Mask active = true) const;
+
     /**
      * \brief Query the probability density of \ref sample_position() for
      * a particular point on the surface.
@@ -1090,6 +1093,7 @@ MI_CALL_TEMPLATE_BEGIN(Shape)
     DRJIT_CALL_METHOD(ray_intersect)
     DRJIT_CALL_METHOD(ray_test)
     DRJIT_CALL_METHOD(sample_position)
+    DRJIT_CALL_METHOD(sample_surface_interaction)
     DRJIT_CALL_METHOD(pdf_position)
     DRJIT_CALL_METHOD(sample_direction)
     DRJIT_CALL_METHOD(pdf_direction)

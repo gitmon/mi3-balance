@@ -90,6 +90,12 @@ Shape<Float, Spectrum>::sample_position(Float /*time*/, const Point2f & /*sample
     NotImplementedError("sample_position");
 }
 
+MI_VARIANT typename Shape<Float, Spectrum>::SurfaceInteraction3f
+Shape<Float, Spectrum>::sample_surface_interaction(Float /*time*/, const Point2f & /*sample*/,
+                                        Mask /*active*/) const {
+    NotImplementedError("sample_surface_interaction");
+}
+
 MI_VARIANT Float Shape<Float, Spectrum>::pdf_position(const PositionSample3f & /*ps*/, Mask /*active*/) const {
     NotImplementedError("pdf_position");
 }

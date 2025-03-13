@@ -804,6 +804,84 @@ Mesh<Float, Spectrum>::sample_position(Float time, const Point2f &sample_, Mask 
     return ps;
 }
 
+MI_VARIANT typename Mesh<Float, Spectrum>::SurfaceInteraction3f
+Mesh<Float, Spectrum>::sample_surface_interaction(Float time, const Point2f &sample_,
+                                                    Mask active) const {
+    ensure_pmf_built();
+
+    using Index = dr::replace_scalar_t<Float, ScalarIndex>;
+    Index face_idx;
+    Point2f sample = sample_;
+
+    std::tie(face_idx, sample.y()) =
+        m_area_pmf.sample_reuse(sample.y(), active);
+
+    Vector3u fi = face_indices(face_idx, active);
+
+    Point3f p0 = vertex_position(fi[0], active),
+            p1 = vertex_position(fi[1], active),
+            p2 = vertex_position(fi[2], active);
+
+    Vector3f e0 = p1 - p0, e1 = p2 - p0;
+    Point2f b = warp::square_to_uniform_triangle(sample);
+
+    // PositionSample3f ps;
+    SurfaceInteraction3f si = dr::zeros<SurfaceInteraction3f>();
+    si.p     = dr::fmadd(e0, b.x(), dr::fmadd(e1, b.y(), p0));
+    // si.t     = 0.0f;
+
+    if (has_vertex_texcoords()) {
+        Point2f uv0 = vertex_texcoord(fi[0], active),
+                uv1 = vertex_texcoord(fi[1], active),
+                uv2 = vertex_texcoord(fi[2], active);
+
+        si.uv = dr::fmadd(uv0, (1.f - b.x() - b.y()),
+                          dr::fmadd(uv1, b.x(), uv2 * b.y()));
+    } else {
+        si.uv = b;
+    }
+
+    if (has_vertex_normals()) {
+        Normal3f n0 = vertex_normal(fi[0], active),
+                 n1 = vertex_normal(fi[1], active),
+                 n2 = vertex_normal(fi[2], active);
+
+        si.n = dr::fmadd(n0, (1.f - b.x() - b.y()),
+                         dr::fmadd(n1, b.x(), n2 * b.y()));
+    } else {
+        si.n = dr::cross(e0, e1);
+    }
+
+    si.n = dr::normalize(si.n);
+    // std::tie(si.dp_du, si.dp_dv) = coordinate_system(si.n);
+
+    if (m_flip_normals)
+        si.n = -si.n;
+
+    si.sh_frame.n = si.n;
+    si.shape    = this;
+    si.instance = nullptr;
+
+    // dr::masked(t, !active) = dr::Infinity<Float>;
+    // active &= is_valid();
+
+    // dr::masked(shape, !active)    = nullptr;
+    // dr::masked(instance, !active) = nullptr;
+
+    si.prim_index  = face_idx;
+    si.time        = time;
+    // si.wavelengths = ray.wavelengths;
+
+    si.initialize_sh_frame();
+
+    // // Incident direction in local coordinates
+    // si.wi = dr::select(active, to_local(-ray.d), -ray.d);
+
+    // si.duv_dx = si.duv_dy = dr::zeros<Point2f>();
+
+    return si;
+}
+
 MI_VARIANT
 
 typename Mesh<Float, Spectrum>::SurfaceInteraction3f

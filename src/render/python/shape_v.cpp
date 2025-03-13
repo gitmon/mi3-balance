@@ -146,6 +146,11 @@ template <typename Ptr, typename Cls> void bind_shape_generic(Cls &cls) {
                 return shape->sample_position(time, sample, active);
             },
             "time"_a, "sample"_a, "active"_a = true, D(Shape, sample_position))
+       .def("sample_surface_interaction",
+            [](Ptr shape, Float time, const Point2f &sample, Mask active) {
+                return shape->sample_surface_interaction(time, sample, active);
+            },
+            "time"_a, "sample"_a, "active"_a = true, D(Shape, sample_position))
        .def("pdf_position",
             [](Ptr shape, const PositionSample3f &ps, Mask active) {
                 return shape->pdf_position(ps, active);
