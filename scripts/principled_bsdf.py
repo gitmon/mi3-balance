@@ -89,20 +89,20 @@ def principled_fresnel(
 
 ### Mesh attribute query functions
 
-def eval_base_color(mesh: mi.Mesh, si: mi.SurfaceInteraction3f, active: Bool) -> mi.Color3f:
-    return mesh.eval_attribute_3("vertex_bsdf_base_color", si, active)
+def eval_base_color(si: mi.SurfaceInteraction3f, active: Bool) -> mi.Color3f:
+    return si.shape.eval_attribute_3("vertex_bsdf_base_color", si, active)
 
-def eval_roughness(mesh: mi.Mesh, si: mi.SurfaceInteraction3f, active: Bool) -> Float:
-    return mesh.eval_attribute_1("vertex_bsdf_roughness", si, active)
+def eval_roughness(si: mi.SurfaceInteraction3f, active: Bool) -> Float:
+    return si.shape.eval_attribute_1("vertex_bsdf_roughness", si, active)
 
-def eval_metallic(mesh: mi.Mesh, si: mi.SurfaceInteraction3f, active: Bool) -> Float:
-    return mesh.eval_attribute_1("vertex_bsdf_metallic", si, active)
+def eval_metallic(si: mi.SurfaceInteraction3f, active: Bool) -> Float:
+    return si.shape.eval_attribute_1("vertex_bsdf_metallic", si, active)
 
-def eval_anisotropic(mesh: mi.Mesh, si: mi.SurfaceInteraction3f, active: Bool) -> Float:
-    return mesh.eval_attribute_1("vertex_bsdf_anisotropic", si, active)
+def eval_anisotropic(si: mi.SurfaceInteraction3f, active: Bool) -> Float:
+    return si.shape.eval_attribute_1("vertex_bsdf_anisotropic", si, active)
 
-def eval_spec_tint(mesh: mi.Mesh, si: mi.SurfaceInteraction3f, active: Bool) -> Float:
-    return mesh.eval_attribute_1("vertex_bsdf_spec_tint", si, active)
+def eval_spec_tint(si: mi.SurfaceInteraction3f, active: Bool) -> Float:
+    return si.shape.eval_attribute_1("vertex_bsdf_spec_tint", si, active)
 
 
 ### Method implementations for principled BSDF
@@ -131,10 +131,10 @@ def bsdf_eval(
     mesh = si.shape
     active &= mesh.is_mesh()
     # assert mesh.is_mesh(), "`si` is not on a mesh!"
-    anisotropic = eval_anisotropic(mesh, si, active) if m_has_anisotropic else 0.0
-    roughness = eval_roughness(mesh, si, active)
-    metallic = eval_metallic(mesh, si, active) if m_has_metallic else 0.0
-    base_color = eval_base_color(mesh, si, active)
+    anisotropic = eval_anisotropic(si, active) if m_has_anisotropic else 0.0
+    roughness = eval_roughness(si, active)
+    metallic = eval_metallic(si, active) if m_has_metallic else 0.0
+    base_color = eval_base_color(si, active)
 
     # Weights for BRDF and BSDF major lobes.
     brdf = (1.0 - metallic)
@@ -192,7 +192,7 @@ def bsdf_eval(
     if dr.any(spec_reflect_active):
         # No need to calculate luminance if there is no color tint.
         lum = mi.luminance(base_color, si.wavelengths) if m_has_spec_tint else 1.0
-        spec_tint = eval_spec_tint(mesh, si, active) if m_has_spec_tint else 0.0
+        spec_tint = eval_spec_tint(si, active) if m_has_spec_tint else 0.0
         # Fresnel term
         F_principled = principled_fresnel(
             F_spec_dielectric, metallic, spec_tint, base_color, lum,
@@ -247,9 +247,9 @@ def bsdf_pdf(
     mesh = si.shape
     active &= mesh.is_mesh()
     # assert mesh.is_mesh(), "`si` is not on a mesh!"
-    anisotropic = eval_anisotropic(mesh, si, active) if m_has_anisotropic else 0.0
-    roughness = eval_roughness(mesh, si, active)
-    metallic = eval_metallic(mesh, si, active) if m_has_metallic else 0.0
+    anisotropic = eval_anisotropic(si, active) if m_has_anisotropic else 0.0
+    roughness = eval_roughness(si, active)
+    metallic = eval_metallic(si, active) if m_has_metallic else 0.0
 
     # BRDF and BSDF major lobe weights
     brdf = 1.0 - metallic
@@ -345,9 +345,9 @@ def bsdf_sample(
     mesh = si.shape
     active &= mesh.is_mesh()
     # assert mesh.is_mesh(), "`si` is not on a mesh!"
-    anisotropic = eval_anisotropic(mesh, si, active) if m_has_anisotropic else 0.0
-    roughness = eval_roughness(mesh, si, active)
-    metallic = eval_metallic(mesh, si, active) if m_has_metallic else 0.0
+    anisotropic = eval_anisotropic(si, active) if m_has_anisotropic else 0.0
+    roughness = eval_roughness(si, active)
+    metallic = eval_metallic(si, active) if m_has_metallic else 0.0
 
     # Weights of BSDF and BRDF major lobes
     brdf = 1.0 - metallic
@@ -525,7 +525,8 @@ class Diffuse:
         bs.sampled_type = +mi.BSDFFlags.DiffuseReflection
         bs.sampled_component = 0
 
-        value = eval_base_color(si.shape, si, active)
+        active &= si.shape.is_mesh()
+        value = eval_base_color(si, active)
 
         return bs, dr.select(active & (bs.pdf > 0.0), value, 0.0)
     
@@ -536,7 +537,7 @@ class Diffuse:
         active &= (cos_theta_i > 0.0) & (cos_theta_o > 0.0)
 
         active &= si.shape.is_mesh()
-        value = eval_base_color(si.shape, si, active) * dr.inv_pi * cos_theta_o
+        value = eval_base_color(si, active) * dr.inv_pi * cos_theta_o
 
         return dr.select(active, value, 0.0)
 

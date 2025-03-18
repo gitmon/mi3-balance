@@ -188,6 +188,12 @@ def compute_loss(
         # Sample `NUM_POINTS` different surface points
         si, delta_emitter_sample, delta_emitter_Li = scene_sampler.sample(num_points, sampler_rt, rng_state)
 
+        # perform a ray visibility test from `si` to the delta emitter
+        vis_rays = si.spawn_ray(delta_emitter_sample.d)
+        vis_rays.maxt = delta_emitter_sample.dist
+        emitter_occluded = radiance_cache.scene.ray_test(vis_rays)
+        delta_emitter_Li &= ~emitter_occluded
+
         # Evaluate RHS scene emitter contribution
         with dr.resume_grad():
             f_emitter = trainable_bsdf.eval(ctx, si, wo = si.to_local(delta_emitter_sample.d), active = True)

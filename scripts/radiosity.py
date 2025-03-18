@@ -32,7 +32,8 @@ class SceneSurfaceSampler:
             - sampler: Sampler. The pseudo-random number generator.
             - rng_state: int. Seed for the PRNG.
         Outputs: 
-            - si: SurfaceInteraction3f. Array of surface sample points of size [#si,].
+            - si: SurfaceInteraction3f. Array of surface sample points of size [#si,]. Each sample point has one outgoing
+                direction `wo` along which Lo and Le are evaluated; this direction is stored in the `si.wi` field.
             - em_ds: DirectionSample3f. Direction sample records from the delta emitter -> surface samples, size [#si,].
             - em_Li: mi.Color3f. Incident radiances from the delta emitter to the surface samples, size [#si,].
         '''
@@ -165,7 +166,6 @@ class RadianceCacheMITSUBA:
         mesh = si.shape
         return dr.select(mesh.is_emitter(), mesh.emitter().eval(si), dr.zeros(mi.Color3f))
     
-
 def compute_loss(
         scene_sampler: SceneSurfaceSampler, 
         radiance_cache: RadianceCacheMITSUBA, 
@@ -195,6 +195,12 @@ def compute_loss(
 
         # Evaluate RHS scene emitter contribution
         ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
+
+        # perform a ray visibility test from `si` to the delta emitter
+        vis_rays = si.spawn_ray(delta_emitter_sample.d)
+        vis_rays.maxt = delta_emitter_sample.dist
+        emitter_occluded = radiance_cache.scene.ray_test(vis_rays)
+        delta_emitter_Li &= ~emitter_occluded
         with dr.resume_grad():
             f_emitter = trainable_bsdf.eval(ctx, si, wo = si.to_local(delta_emitter_sample.d))
             rhs = f_emitter * delta_emitter_Li

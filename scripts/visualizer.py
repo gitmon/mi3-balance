@@ -26,7 +26,7 @@ def plot_mesh(mesh: mi.Mesh, label: str = None) -> ps.surface_mesh.SurfaceMesh:
     V, F = mesh.vertex_positions_buffer(), mesh.faces_buffer()
     V = V.numpy().reshape((-1,3))#.T
     F = F.numpy().reshape((-1,3))#.T
-    return ps.register_surface_mesh(label if label is not None else "Mesh", V, F)
+    return ps.register_surface_mesh(label if label is not None else "Mesh", V, F, material='flat')
 
 def plot_mesh_attributes(mesh: mi.Mesh, mesh_label: str, attrib_names: list[str], is_color: bool = False):
     m = plot_mesh(mesh, mesh_label)
