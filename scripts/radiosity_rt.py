@@ -62,7 +62,7 @@ class SceneSurfaceSampler:
         else:
             return si, dr.zeros(mi.DirectionSample3f), dr.zeros(mi.Color3f)
     
-class RadianceCacheMITSUBA:
+class RadianceCacheMiRT:
     def __init__(self, scene: mi.Scene, spp_per_wo: int, spp_per_wi: int):
         '''
         Inputs:
@@ -74,6 +74,15 @@ class RadianceCacheMITSUBA:
         self.integrator = scene.integrator()
         self.spp_per_wo = spp_per_wo
         self.spp_per_wi = spp_per_wi
+
+    def pathtrace(self, rays: mi.Ray3f, spp: int, sampler_rt: mi.Sampler, rng_state: int):
+        num_rays = dr.width(rays)
+        ray_flat_idxs = dr.repeat(dr.arange(UInt, num_rays), spp)    # contiguous order
+        rays_flattened = dr.gather(mi.Ray3f, rays, ray_flat_idxs, mode = dr.ReduceMode.Local)
+        sampler_rt.seed(rng_state, num_rays * spp)
+        colors, _, _ = self.integrator.sample(self.scene, sampler_rt, rays_flattened)
+        L = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = spp) / spp
+        return L
 
     def query_cached_Lo(self, si: mi.SurfaceInteraction3f, sampler_rt: mi.Sampler, rng_state: int = 0)  -> mi.Color3f:
         '''
@@ -94,12 +103,8 @@ class RadianceCacheMITSUBA:
         # Pathtrace along `-wo` to get the radiance when looking at `A`. For each `Lo_ray`,
         # compute `SPP_LO` different pathtraced samples and average them to get the outgoing 
         # radiance.
-        ray_flat_idxs = dr.repeat(dr.arange(UInt, num_points), self.spp_per_wo)    # contiguous order
-        rays_flattened = dr.gather(mi.Ray3f, Lo_rays, ray_flat_idxs, mode = dr.ReduceMode.Direct)
-        sampler_rt.seed(rng_state + 0x0FFF_FFFF, num_points * self.spp_per_wo)
-        colors, _, _ = self.integrator.sample(self.scene, sampler_rt, rays_flattened)
-        Lo = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = self.spp_per_wo) / self.spp_per_wo
-        return Lo
+        return self.pathtrace(Lo_rays, self.spp_per_wo, sampler_rt, rng_state + 0x0FFF_FFFF)
+
 
     def query_cached_Li(self, si: mi.SurfaceInteraction3f, num_wi: int, sampler_rt: mi.Sampler, rng_state: int = 0) -> mi.Color3f:
         '''
@@ -149,17 +154,14 @@ class RadianceCacheMITSUBA:
         uv = sampler_rt.next_2d()
         wi_local = mi.warp.square_to_cosine_hemisphere(uv)
         wi_pdf   = mi.warp.square_to_cosine_hemisphere_pdf(wi_local)
+        wi_weight = dr.select(wi_pdf > 0.0, dr.rcp(wi_pdf), 0.0)
         wi_world = si_flattened.to_world(wi_local)
         wi_rays = si_flattened.spawn_ray(wi_world)
 
         # Compute Li for each of the incident directions. For each `Li_ray`, trace `SPP_LI` 
         # different MC samples and average them to get the outgoing radiance.
-        ray_flat_idxs = dr.repeat(dr.arange(UInt, NUM_RAYS), self.spp_per_wi)    # contiguous order
-        rays_flattened = dr.gather(mi.Ray3f, wi_rays, ray_flat_idxs, mode = dr.ReduceMode.Local)
-        sampler_rt.seed(rng_state + 3 * 0x0FFF_FFFF, NUM_RAYS * self.spp_per_wi)
-        colors, _, _ = self.integrator.sample(self.scene, sampler_rt, rays_flattened)
-        Li = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = self.spp_per_wi) / self.spp_per_wi
-        Li = dr.select(wi_pdf > 0.0, Li * dr.rcp(wi_pdf), dr.zeros(mi.Color3f))
+        Li = self.pathtrace(wi_rays, self.spp_per_wi, sampler_rt, rng_state + 3 * 0x0FFF_FFFF)
+        Li *= wi_weight
         return Li, wi_local, si_flattened
     
     def query_cached_Le(self, si: mi.SurfaceInteraction3f) -> mi.Color3f:
@@ -168,7 +170,7 @@ class RadianceCacheMITSUBA:
     
 def compute_loss(
         scene_sampler: SceneSurfaceSampler, 
-        radiance_cache: RadianceCacheMITSUBA, 
+        radiance_cache: RadianceCacheMiRT, 
         trainable_bsdf: mi.BSDF, 
         num_points: int,
         num_wi: int, 

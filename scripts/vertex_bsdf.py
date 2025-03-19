@@ -555,10 +555,11 @@ class Diffuse:
 import polyscope as ps
 from visualizer import plot_mesh_attributes
 
-def visualize_textures(scene: mi.Scene):
+def visualize_textures(scene: mi.Scene, init_ps = True):
     meshes = [shape for shape in scene.shapes() if shape.is_mesh()]
 
-    ps.init()
+    if init_ps:
+        ps.init()
 
     bsdf_keys = [
         'vertex_bsdf_base_color',
@@ -571,5 +572,5 @@ def visualize_textures(scene: mi.Scene):
         keys = [key for key in bsdf_keys if mesh.has_attribute(key)]
         plot_mesh_attributes(mesh, f"mesh{idx}", keys, is_color=True)
 
-    ps.show()
-    ps.clear_user_callback()
+    if init_ps:
+        ps.show()

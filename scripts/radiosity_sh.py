@@ -5,7 +5,7 @@ import drjit as dr
 import mitsuba as mi
 from drjit.auto import Float, UInt, Bool
 from vertex_bsdf import Principled
-from sh_fitting import fit_sh_on_scene
+from sh_fitting import get_sh_count, fit_sh_on_scene
 
 def is_delta_emitter(emitter: mi.Emitter):
     return (emitter.m_flags & mi.EmitterFlags.Delta) | \
@@ -176,8 +176,6 @@ class RadianceCacheMiSH:
         Li = dr.select(wi_pdf > 0.0, Li * dr.rcp(wi_pdf), dr.zeros(mi.Color3f))
 
         return Li, wi_local, si_flattened
-    
-
 
 def compute_loss(
     scene_sampler: SceneSurfaceSampler, 
