@@ -8,50 +8,47 @@ from sh_fitting import get_sh_count
 from radiosity_sh import RadianceCacheMiSH, SceneSurfaceSampler
 from radiosity_rt import RadianceCacheMiRT
 
+def compute_face_areas(mesh: mi.Mesh, face_idxs: mi.Point3u):
+        p0 = mesh.vertex_position(face_idxs.x)
+        p1 = mesh.vertex_position(face_idxs.y)
+        p2 = mesh.vertex_position(face_idxs.z)
+        e0, e1 = p1 - p0, p2 - p0
+        return 0.5 * dr.norm(dr.cross(e0, e1))
+
 class EnergyPMF:
     def __init__(self, rc: RadianceCacheMiSH):
-        self.pmf, self.mesh_start_idxs, self.mesh_end_idxs = self.build_energy_pmf(rc)
+        self.build_energy_pmf(rc)
         self.meshes = rc.scene.shapes_dr()
+        self.scene = rc.scene
 
     def build_energy_pmf(self, rc: RadianceCacheMiSH) -> mi.DiscreteDistribution:
         meshes = rc.scene.shapes_dr()
         mesh_active = meshes.is_mesh()
-        vtx_counts = dr.cuda.ad.UInt(dr.select(mesh_active, mi.MeshPtr(meshes).vertex_count(), 0))
-        mesh_start_indices = dr.prefix_reduce(dr.ReduceOp.Add, vtx_counts, exclusive=True)
-        mesh_end_indices = dr.prefix_reduce(dr.ReduceOp.Add, vtx_counts, exclusive=False)
-        E_scene = dr.zeros(Float, mesh_end_indices[-1])
+        face_counts = dr.cuda.ad.UInt(dr.select(mesh_active, mi.MeshPtr(meshes).face_count(), 0))
+        mesh_start_indices = dr.prefix_reduce(dr.ReduceOp.Add, face_counts, exclusive=True)
+        mesh_end_indices   = dr.prefix_reduce(dr.ReduceOp.Add, face_counts, exclusive=False)
 
+        E_scene = dr.zeros(Float, mesh_end_indices[-1])
         for mesh_idx, mesh in enumerate(meshes):
             # Compute the outgoing energy from each mesh vertex as the sum of the squared SH coefficients
-            E_mesh = dr.zeros(Float, mesh.vertex_count())
+            vertex_energies = dr.zeros(Float, mesh.vertex_count())
             for sh_idx in range(get_sh_count(rc.order)):
-                coeffs = dr.unravel(mi.Color3f, mesh.attribute_buffer(f"vertex_Lo_coeffs_{sh_idx}"))
-                E_mesh += dr.squared_norm(coeffs)
-            # Store the mesh vertices' energy values in the scene-level energy-per-vertex array
-            # start_idx = mesh_end_indices[mesh_idx - 1] if mesh_idx > 0 else 0
+                vertex_coeffs = dr.unravel(mi.Color3f, mesh.attribute_buffer(f"vertex_Lo_coeffs_{sh_idx}"))
+                vertex_energies += dr.squared_norm(vertex_coeffs)
+
+            E_faces = dr.zeros(Float, mesh.face_count())
+            face_idxs = dr.unravel(mi.Point3u, mesh.faces_buffer())
+            face_area = compute_face_areas(mesh, face_idxs)
+            dtype = type(vertex_energies)
+            E_v1 = dr.gather(dtype, vertex_energies, face_idxs.x)
+            E_v2 = dr.gather(dtype, vertex_energies, face_idxs.y)
+            E_v3 = dr.gather(dtype, vertex_energies, face_idxs.z)
+            E_faces = face_area * dr.rcp(3.0) * (E_v1 + E_v2 + E_v3)
+
+            # Store the mesh faces' energy values in the scene-level energy-per-vertex array
             start_idx = mesh_start_indices[mesh_idx]
             end_idx = mesh_end_indices[mesh_idx]
-            dr.scatter_add(E_scene, E_mesh, dr.arange(UInt, start_idx, end_idx))
-
-        # ============================================
-        # meshes = [shape for shape in rc.scene.shapes() if shape.is_mesh()]
-        # vtx_counts = dr.cuda.ad.UInt([mesh.vertex_count() for mesh in meshes])
-        # scene_Nv = dr.sum(vtx_counts)[0]
-        # mesh_start_indices = dr.prefix_reduce(dr.ReduceOp.Add, vtx_counts, exclusive=True)
-        # mesh_end_indices = dr.prefix_reduce(dr.ReduceOp.Add, vtx_counts, exclusive=False)
-        # E_scene = dr.zeros(Float, scene_Nv)
-
-        # for mesh_idx, mesh in enumerate(meshes):
-        #     # Compute the energy emitted by each vertex of the mesh as the sum of the squared SH coefficients
-        #     E_mesh = dr.zeros(Float, mesh.vertex_count())
-        #     for sh_idx in range(get_sh_count(rc.order)):
-        #         coeffs = dr.unravel(mi.Color3f, mesh.attribute_buffer(f"vertex_Lo_coeffs_{sh_idx}"))
-        #         E_mesh += dr.squared_norm(coeffs)
-        #     # Store the mesh vertices' energy values in the scene-level energy-per-vertex array
-        #     start_idx = mesh_end_indices[mesh_idx - 1] if mesh_idx > 0 else 0
-        #     end_idx = mesh_end_indices[mesh_idx]
-        #     dr.scatter_add(E_scene, E_mesh, dr.arange(UInt, start_idx, end_idx))
-        # ============================================
+            dr.scatter_add(E_scene, E_faces, dr.arange(UInt, start_idx, end_idx))
 
         # # DEBUG: the scene-level array `E_scene` should simply be the concatenation of the meshes' energy-per-vertex arrays
         # import numpy as np
@@ -67,45 +64,77 @@ class EnergyPMF:
         # assert np.allclose(E_scene_np, E_scene.numpy()), "Scene vertex array is not correct!"
 
         pmf = mi.DiscreteDistribution(E_scene)
-        return pmf, mesh_start_indices, mesh_end_indices
+        
+        self.pmf = pmf
+        self.mesh_start_idxs = mesh_start_indices 
+        self.mesh_end_idxs = mesh_end_indices
+
     
-    def sample(self, si: mi.SurfaceInteraction3f, sample1: Float) -> tuple[mi.Vector3f, Float, Float]:
-        # Sample a vertex on the emissive scene
-        # the returned vtx_idx indexes into the scene vertex array, i.e. the concatenation of the meshes' vertices
-        global_vtx_idx, pdf = self.pmf.sample_pmf(sample1)
+    def sample(self, si: mi.SurfaceInteraction3f, sample2_: mi.Point2f) -> tuple[mi.Vector3f, Float, Float]:
+        # Sample a triangle on the emissive scene
+        sample2 = mi.Point2f(sample2_)
+        global_face_idx, sample_x, pdf = self.pmf.sample_reuse_pmf(sample2.x)
+        sample2.x = sample_x
+
+        # find the mesh and prim index corresponding to this triangle
         dtype = type(self.mesh_end_idxs)
         mesh_count = len(self.mesh_end_idxs)
-        mesh_idxs = dr.binary_search(0, mesh_count, lambda index: dr.gather(dtype, self.mesh_end_idxs, index) <= global_vtx_idx)
+        mesh_idxs = dr.binary_search(0, mesh_count, lambda index: dr.gather(dtype, self.mesh_end_idxs, index) <= global_face_idx)
         idx_offset = dr.gather(dtype, self.mesh_start_idxs, mesh_idxs)
-        local_vtx_idx = global_vtx_idx - idx_offset
+        local_face_idx = global_face_idx - idx_offset
 
-        meshes = dr.gather(mi.MeshPtr, self.meshes, mesh_idxs)
-        p, n = meshes.vertex_position(local_vtx_idx), meshes.vertex_normal(local_vtx_idx)
-        # return PositionSample? or no?
-        ps = dr.zeros(mi.PositionSample3f, dr.width(sample1))
-        ps.p, ps.n = p, n
+        # Sample a point on the triangle
+        mesh = dr.gather(mi.MeshPtr, self.meshes, mesh_idxs)
+        fi = mesh.face_indices(local_face_idx)
+
+        p0 = mesh.vertex_position(fi.x)
+        p1 = mesh.vertex_position(fi.y)
+        p2 = mesh.vertex_position(fi.z)
+        e0 = p1 - p0
+        e1 = p2 - p0
+        b = mi.warp.square_to_uniform_triangle(sample2)
+
+        ps = dr.zeros(mi.PositionSample3f, dr.width(sample2))
+        ps.time  = 0.0
+        ps.pdf   = pdf
         ps.delta = False
-        ps.pdf = pdf
-        
-        d_local = si.to_local(p - si.p)
-        dist_squared = dr.squared_norm(d_local)
-        dist = dr.sqrt(dist_squared)
-        d_local *= dr.rcp(dist)
-        weight = dr.select(ps.pdf > 0.0, dr.rcp(ps.pdf), Float(0.0))
+
+        ps.p     = dr.fma(e0, b.x, dr.fma(e1, b.y, p0))
+        ps.n = dr.select(
+            mesh.has_vertex_normals(), 
+            dr.fma(mesh.vertex_normal(fi.x), (1.0 - b.x - b.y),
+                    dr.fma(mesh.vertex_normal(fi.y), b.x,
+                           mesh.vertex_normal(fi.z) * b.y)),
+            dr.cross(e0, e1))
+        ps.n = dr.normalize(ps.n)
+
+        d_world = ps.p - si.p
+        dist_squared = dr.squared_norm(d_world)
+        d_world *= dr.rsqrt(dist_squared)
+
+        # standard area sampling case
+        # weight = dr.rcp(self.pmf.normalization())     # sum of surface areas
+
+        # energy-weighted area sampling?
+        # weight = self.pmf.sum() / (self.pmf.eval_pmf(global_face_idx) / compute_face_areas(mesh, fi))
+        # weight = dr.select(pdf > 0.0, dr.rcp(pdf) * compute_face_areas(mesh, fi), 0.0)
+        ps.pdf /= compute_face_areas(mesh, fi)
+        weight = dr.select(ps.pdf > 0.0, dr.rcp(ps.pdf), 0.0)
 
         # Handle geometry term?
         weight *= dr.select(dist_squared > 0.0, dr.rcp(dist_squared), 0.0)
-        cos_theta_i = mi.Frame3f.cos_theta(d_local)
-        cos_theta_o = mi.Frame3f.cos_theta(si.wi)
-        weight &= (cos_theta_i > 0.0) & (cos_theta_o > 0.0)
-        weight *= cos_theta_i               # ?
+        cos_theta_o = dr.maximum(0.0, dr.dot(ps.n, -d_world))
         weight *= cos_theta_o               # ?
-        weight *= self.pmf.normalization()  # ?
+        # cos_theta_i = dr.maximum(0.0, mi.Frame3f.cos_theta(si.wi))
+        # weight *= cos_theta_i               # ?
 
-        # print("Total area: ", dr.sum(self.meshes.surface_area()))
-        # print("Total pmf: ", self.pmf.normalization())
+        vis_ray = si.spawn_ray(d_world)
+        vis_ray.maxt = dr.sqrt(dist_squared) - 2.0 * mi.math.RayEpsilon
+        weight &= ~self.scene.ray_test(vis_ray)
 
-        return d_local, weight, p
+        d_local = si.to_local(d_world)
+
+        return d_local, weight, pdf
 
 class RadianceCacheEM(RadianceCacheMiRT):
     def __init__(self, scene: mi.Scene, spp_per_wo: int, spp_per_wi: int):
@@ -181,29 +210,25 @@ class RadianceCacheEM(RadianceCacheMiRT):
         # Compute the incident radiance on `A` for a direction, `wi`.
         # Total rays: num_points * num_wi (per point)
         sampler_rt.seed(rng_state + 2 * 0x0FFF_FFFF, num_points * num_wi)
+        uv = sampler_rt.next_2d()
 
-        wi_local, wi_weight = self.energy_pmf.sample(si_flattened, sampler_rt.next_1d())[:2]
+        light_wi, light_weight, light_pdf = self.energy_pmf.sample(si_flattened, uv)
+        # light_eval_pdf = mi.warp.square_to_cosine_hemisphere_pdf(light_wi)
+
+
         
-        # uv = sampler_rt.next_2d()
         # wi_local = mi.warp.square_to_cosine_hemisphere(uv)
         # wi_pdf   = mi.warp.square_to_cosine_hemisphere_pdf(wi_local)
         # wi_weight = dr.select(wi_pdf > 0.0, dr.rcp(wi_pdf), 0.0)
 
-        wi_world = si_flattened.to_world(wi_local)
-        wi_rays = si_flattened.spawn_ray(wi_world)
-
-        # vis_rays = mi.Ray3f(wi_rays, dist - mi.math.RayEpsilon)
-        # vis = ~self.scene.ray_test(vis_rays)
-
+        wi_rays = si_flattened.spawn_ray(si_flattened.to_world(light_wi))
 
         # Compute Li for each of the incident directions. For each `Li_ray`, trace `SPP_LI` 
         # different MC samples and average them to get the outgoing radiance.
         Li = self.pathtrace(wi_rays, self.spp_per_wi, sampler_rt, rng_state + 3 * 0x0FFF_FFFF)
-        Li *= wi_weight
+        Li *= light_weight
 
-        # Li *= dr.select(vis, 1.0, 0.0)
-
-        return Li, wi_local, si_flattened, wi_rays
+        return Li, light_wi, si_flattened, wi_rays
     
 
 from visualizer import plot_rays
@@ -260,11 +285,7 @@ def compute_loss_DEBUG(
         # print(f"{dr.width(Li)=}")
         # print(Li)
 
-        # # ps.init()
         # plot_rays(wi_rays, "wi")
-        # print(si.p)
-        # print(wi_rays)
-        # # ps.show()
 
         with dr.resume_grad():
             f_io = trainable_bsdf.eval(ctx, si = si_flattened, wo = wi_local)
