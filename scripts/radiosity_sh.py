@@ -35,7 +35,7 @@ class SceneSurfaceSampler:
             - em_Li: mi.Color3f. Incident radiances from the delta emitter to the surface samples, size [#si,].
         '''
         # Generate `NUM_POINTS` different surface samples
-        sampler_rt.seed(rng_state, num_points)
+        sampler_rt.seed(rng_state, num_points); rng_state += 0x00FF_FFFF
         idx = self.distribution.sample(sampler_rt.next_1d(), True)
         shape = dr.gather(mi.ShapePtr, self.shape_ptrs, idx)
         uv = sampler_rt.next_2d()
@@ -66,9 +66,9 @@ class SceneSurfaceSampler:
             point_light = self.delta_emitters[0]
             # NOTE: sample `uv` is not actually used in the case of point lights
             uv = sampler_rt.next_2d()
-            return si, *point_light.sample_direction(si, uv, True)
+            return si, *point_light.sample_direction(si, uv, True), rng_state
         else:
-            return si, dr.zeros(mi.DirectionSample3f), dr.zeros(mi.Color3f)
+            return si, dr.zeros(mi.DirectionSample3f), dr.zeros(mi.Color3f), rng_state
         
 
 
