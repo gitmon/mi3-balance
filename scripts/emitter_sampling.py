@@ -98,10 +98,13 @@ class EnergyPMF:
 
         ps = dr.zeros(mi.PositionSample3f, dr.width(sample2))
         ps.time  = 0.0
-        # ps.pdf   = pdf
+        # # standard area sampling case
+        # weight = dr.rcp(self.pmf.normalization())     # sum of surface areas
+        # # energy-weighted area sampling?
+        ps.pdf = pdf / compute_face_areas(mesh, fi)
         ps.delta = False
 
-        ps.p     = dr.fma(e0, b.x, dr.fma(e1, b.y, p0))
+        ps.p = dr.fma(e0, b.x, dr.fma(e1, b.y, p0))
         ps.n = dr.select(
             mesh.has_vertex_normals(), 
             dr.fma(mesh.vertex_normal(fi.x), (1.0 - b.x - b.y),
@@ -114,44 +117,20 @@ class EnergyPMF:
         dist_squared = dr.squared_norm(d_world)
         d_world *= dr.rsqrt(dist_squared)
 
-        # standard area sampling case
-        # weight = dr.rcp(self.pmf.normalization())     # sum of surface areas
+        # Handle geometry term
+        cos_theta_o = dr.abs(dr.dot(ps.n, -d_world))
+        G = dr.select(dist_squared > 0.0, cos_theta_o * dr.rcp(dist_squared), 0.0)
+        pdf_angle = dr.select(G > 0.0, ps.pdf * dr.rcp(G), 0.0)
 
-        # energy-weighted area sampling?
-        # weight = self.pmf.sum() / (self.pmf.eval_pmf(global_face_idx) / compute_face_areas(mesh, fi))
-        # weight = dr.select(pdf > 0.0, dr.rcp(pdf) * compute_face_areas(mesh, fi), 0.0)
-        ps.pdf = pdf / compute_face_areas(mesh, fi)
-        weight = dr.select(ps.pdf > 0.0, dr.rcp(ps.pdf), 0.0)
-
-        # Handle geometry term?
-        G = dr.select(dist_squared > 0.0, dr.rcp(dist_squared), 0.0)
-        cos_theta_o = dr.maximum(0.0, dr.dot(ps.n, -d_world))
-        G *= cos_theta_o
-        weight *= G
-
+        # Handle visibility
         vis_ray = si.spawn_ray_to(ps.p)
         occluded = self.scene.ray_test(vis_ray)
-        weight &= ~occluded
 
+        # Weight = vis / l_pdf_angle
+        weight = dr.select(~occluded & (pdf_angle > 0.0), dr.rcp(pdf_angle), 0.0)
         d_local = si.to_local(d_world)
 
-        # # DEBUG
-        # bad_dir_idx = dr.arange(UInt, 0, dr.width(si))
-        # area = compute_face_areas(mesh, fi)
-        # v = ps.p;       print("sample: ps.p =", dr.gather(type(v), v, bad_dir_idx))
-        # v = ps.n;       print("sample: ps.n =", dr.gather(type(v), v, bad_dir_idx))
-        # v = ps.pdf;     print("sample: ps.pdf =", dr.gather(type(v), v, bad_dir_idx))
-        # v = area;       print("sample: area =", dr.gather(type(v), v, bad_dir_idx))
-        # v = pdf;        print("sample: pdf =", dr.gather(type(v), v, bad_dir_idx))
-        # inv_d2 = dr.rcp(dist_squared)
-        # v = inv_d2;     print("sample: inv_d2 =", dr.gather(type(v), v, bad_dir_idx))
-        # dist = dr.norm(ps.p - si.p)
-        # v = dist;       print("sample: dist =", dr.gather(type(v), v, bad_dir_idx))
-        # v = cos_theta_o;print("sample: cos_to =", dr.gather(type(v), v, bad_dir_idx))
-        # v = G;          print("sample: G =", dr.gather(type(v), v, bad_dir_idx))
-        # v = occluded;   print("sample: occluded =", dr.gather(type(v), v, bad_dir_idx))
-
-        return d_local, weight, ps.pdf, G
+        return d_local, weight, pdf_angle, G
     
     def eval_pdf(self, si: mi.SurfaceInteraction3f, wi_local: mi.Vector3f) -> Float:
         d_world = si.to_world(wi_local)
@@ -160,6 +139,7 @@ class EnergyPMF:
         active = pi.is_valid()
         local_face_idx = pi.prim_index
 
+        # Find the index of the hit triangle in the energy PMF
         mesh_idx = dr.zeros(dr.cuda.ad.UInt, dr.width(wi_local))
         mesh_ptrs = self.scene.shapes_dr()
         for i, shape in enumerate(mesh_ptrs):
@@ -167,21 +147,25 @@ class EnergyPMF:
         idx_offsets = dr.gather(type(self.mesh_start_idxs), self.mesh_start_idxs, mesh_idx)
         global_face_idx = dr.select(active, local_face_idx + idx_offsets, 0)
         
+        # Evaluate the hit probability
         meshes = dr.gather(mi.MeshPtr, mesh_ptrs, mesh_idx)
         fi = meshes.face_indices(local_face_idx)
         pdf = dr.select(active, 
                         self.pmf.eval_pmf_normalized(global_face_idx) / compute_face_areas(meshes, fi),
                         Float(0.0))
         
-        # Compute weight, including geometry term?
+        # Compute geometry term for this hit point
         dist = pi.t
-        G = dr.select(dist > 0.0, dr.rcp(dr.square(dist)), 0.0)
         si_triangle = pi.compute_surface_interaction(ray, active=active)
-        cos_theta_o = dr.maximum(0.0, dr.dot(si_triangle.sh_frame.n, -d_world))
-        G *= cos_theta_o
-        G = dr.select(active, G, 0.0)
-        # weight = G * dr.select(pdf > 0.0, dr.rcp(pdf), 0.0)
-        return pdf, G
+        # TODO: sh_frame.N or si.N?
+        # cos_theta_o = dr.abs(dr.dot(si_triangle.sh_frame.n, -d_world))
+        cos_theta_o = dr.abs(dr.dot(si_triangle.n, -d_world))   
+        G = dr.select(active & (dist > 0.0), cos_theta_o * dr.rcp(dist * dist), 0.0)
+
+        # Convert area pdf to solid angle measure
+        pdf_angle = dr.select(G > 0.0, pdf * dr.rcp(G), 0.0)
+
+        return pdf_angle, G
     
     def test(self, si: mi.SurfaceInteraction3f, sample1: Float, sample2: mi.Point2f):
         wi_local, _, pdf_ref, G_ref = self.sample(si, sample1, sample2)
@@ -282,68 +266,43 @@ class RadianceCacheEM(RadianceCacheMiRT):
         # Total rays: num_points * num_wi (per point)
         sampler_rt.seed(rng_state + 2 * 0x0FFF_FFFF, num_points * num_wi)
         uv = sampler_rt.next_2d()
-
+        
         # # DEBUG
         # self.energy_pmf.test(si_flattened, sampler_rt.next_1d(), sampler_rt.next_2d())
 
         if use_light:
+            # light_pdf is expressed in units of solid angle
             light_wi, light_weight, light_pdf, G_factor = self.energy_pmf.sample(si_flattened, sampler_rt.next_1d(), uv)
-            hemi_pdf = mi.warp.square_to_cosine_hemisphere_pdf(light_wi)
-            hemi_pdf *= G_factor
-            # light_pdf *= dr.select(G_factor > 0.0, dr.rcp(G_factor), 0.0)
-            light_weight *= dr.select(hemi_pdf > 0.0, light_pdf / (light_pdf + hemi_pdf), 1.0)
-            wi_local, wi_pdf, wi_weight = light_wi, light_pdf, light_weight
+            # assert ~dr.any((light_pdf == 0.0) & (light_weight != 0.0))
 
-            # wi_weight *= G_factor
-            # wi_weight *= dr.select(G_factor > 0.0, 1.0 / G_factor, 0.0)
+            # Evaluate material pdf and MIS weight
+            hemi_pdf = mi.warp.square_to_cosine_hemisphere_pdf(light_wi)
+            mis_weight = dr.select(hemi_pdf > 0.0, light_pdf / (light_pdf + hemi_pdf), 1.0)
+            light_weight *= mis_weight 
+            wi_local, wi_pdf, wi_weight = light_wi, light_pdf, light_weight
         else:
             # uv = sampler_rt.next_2d()
             hemi_wi = mi.warp.square_to_cosine_hemisphere(uv)
             hemi_pdf = mi.warp.square_to_cosine_hemisphere_pdf(hemi_wi)
             hemi_weight = dr.select(hemi_pdf > 0.0, dr.rcp(hemi_pdf), 0.0)
+            # assert ~dr.any((hemi_pdf == 0.0) & (hemi_weight != 0.0))
+
+            # Evaluate light pdf and MIS weight
+            # light_pdf is expressed in units of solid angle
             light_pdf, G_factor = self.energy_pmf.eval_pdf(si_flattened, hemi_wi)
-            hemi_pdf *= G_factor
-            # hemi_pdf *= dr.select(G_factor > 0.0, dr.rcp(G_factor), 0.0)
-            # light_pdf *= G_factor
-            # light_pdf *= dr.select(G_factor > 0.0, dr.rcp(G_factor), 0.0)
-            hemi_weight *= dr.select(light_pdf > 0.0, (hemi_pdf) / (light_pdf + hemi_pdf), 1.0)
+            mis_weight = dr.select(light_pdf > 0.0, hemi_pdf / (light_pdf + hemi_pdf), 1.0)
+            hemi_weight *= mis_weight
             wi_local, wi_pdf, wi_weight = hemi_wi, hemi_pdf, hemi_weight
 
-            # wi_weight *= G_factor
-            # wi_weight *= dr.select(G_factor > 0.0, 1.0 / G_factor, 0.0)
-
+        assert ~dr.any((wi_pdf == 0.0) & (wi_weight != 0.0))
 
         wi_rays = si_flattened.spawn_ray(si_flattened.to_world(wi_local))
         active = wi_weight > 0.0
 
-        # # DEBUG
-        # start = 0
-        # end = num_wi
-        # # print(wi_weight.numpy()[start:end])
-        # # print(active.numpy()[start:end])
-        # bad_dir_idx = np.argwhere(active.numpy()[start:end]).ravel()
-        # print("bad_dir idx:", bad_dir_idx)  # 1764
-        # for i in bad_dir_idx:
-        #     print("bad_dir weight:", wi_weight.numpy()[start + i])
-        #     print("bad_dir active:", active.numpy()[start + i])
-
-        # plot_rays(dr.gather(mi.Ray3f, wi_rays, start + bad_dir_idx), "BAD RAY")
-
-
         # Compute Li for each of the incident directions. For each `Li_ray`, trace `SPP_LI` 
         # different MC samples and average them to get the outgoing radiance.
         Li = self.pathtrace(wi_rays, self.spp_per_wi, sampler_rt, rng_state + 3 * 0x0FFF_FFFF, active)
-
-        # # DEBUG
-        # print("Li:",dr.gather(mi.Color3f, Li, start + bad_dir_idx).numpy().T)
-        # print("Li:",Li.numpy().T)
-
         Li *= wi_weight
-
-        # # DEBUG
-        # print("Li (weighted):",dr.gather(mi.Color3f, Li, start + bad_dir_idx).numpy().T)
-        # print("Li (weighted):",Li.numpy().T)
-
         return Li, wi_local, si_flattened, wi_rays
     
 
@@ -398,27 +357,20 @@ def compute_loss_DEBUG(
         Lo, active = radiance_cache.query_cached_Lo(si, sampler_rt, rng_state)
         lhs = dr.select(active, -Le + Lo, dr.zeros(mi.Color3f))
 
-        # print(f"{dr.gather(mi.Color3f, Le, 69)=}")
-        # print(f"{dr.gather(mi.Color3f, Lo, 69)=}")
-
-
         # Evaluate RHS integral
-
+        # Light sampling
         Li, wi_local, si_flattened, wi_rays = radiance_cache.query_cached_Li(si, num_wi, sampler_rt, rng_state, True)
-
         with dr.resume_grad():
             f_io = trainable_bsdf.eval(ctx, si = si_flattened, wo = wi_local)
             integrand = f_io * Li
             rhs += dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
 
-
-
+        # Material/cosine sampling
         Li, wi_local, si_flattened, wi_rays = radiance_cache.query_cached_Li(si, num_wi, sampler_rt, rng_state + 0x0FFF_FFFF, False)
-
         with dr.resume_grad():
             f_io = trainable_bsdf.eval(ctx, si = si_flattened, wo = wi_local)
             integrand = f_io * Li
-            rhs = dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
+            rhs += dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
         
 
 
