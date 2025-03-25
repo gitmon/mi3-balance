@@ -15,13 +15,10 @@ def is_delta_emitter(emitter: mi.Emitter):
 class SceneSurfaceSampler:
     def __init__(self, scene: mi.Scene):
         shape_ptrs = scene.shapes_dr()
-        areas_dr = Float([shape.surface_area()[0] for shape in shape_ptrs])
-        self.distribution = mi.DiscreteDistribution(areas_dr)
+        self.distribution = mi.DiscreteDistribution(shape_ptrs.surface_area())
         self.shape_ptrs = shape_ptrs
+        self.has_delta_emitters = dr.any((scene.emitters_dr().flags() & UInt(mi.EmitterFlags.Delta)) > 0)
         self.delta_emitters = [emitter for emitter in scene.emitters() if is_delta_emitter(emitter)]
-
-        # DEBUG
-        self.scene = scene
 
     def sample(self, num_points: int, sampler_rt: mi.Sampler, rng_state: int = 0) -> mi.SurfaceInteraction3f:
         '''
@@ -45,20 +42,6 @@ class SceneSurfaceSampler:
         uv = sampler_rt.next_2d()
         wo_local = mi.warp.square_to_cosine_hemisphere(uv)
         si.wi = wo_local
-
-
-        # # DEBUG
-        # si = dr.zeros(mi.SurfaceInteraction3f)
-        # shape_idx = 4
-        # vtx_idx = 101
-        # mesh = self.scene.shapes()[shape_idx]
-        # si = dr.zeros(mi.SurfaceInteraction3f)
-        # si.p = mesh.vertex_position(95)
-        # si.n = mesh.vertex_normal(95)
-        # si.sh_frame = mi.Frame3f(si.n)
-        # si.wi = mi.Vector3f([0],[0],[1])
-        # si.shape = mi.ShapePtr(mesh)
-
 
         # Compute the Li contribution from delta emitter sources
         # TODO: check how to modify/extend this to handle envmaps

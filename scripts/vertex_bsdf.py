@@ -119,6 +119,7 @@ def bsdf_eval(
             ) -> mi.Color3f:
     m_eta = 2.0 * dr.rcp(1.0 - dr.sqrt(0.08 * m_specular)) - 1.0
 
+    # TODO: should invocations of `Frame3f.cos_theta()` be using the shading frame of the `si` instead?
     cos_theta_i = mi.Frame3f.cos_theta(si.wi)
     # Ignore perfectly grazing configurations
     active &= cos_theta_i != 0.0
@@ -487,21 +488,30 @@ class Principled:
 
         param_keys = []
 
-        mesh.add_attribute("vertex_bsdf_base_color", 3, dr.ravel(vertex_colors))
-        mesh.add_attribute("vertex_bsdf_roughness", 1, dr.full(Float, m_roughness, Nv))
+        if not(mesh.has_attribute("vertex_bsdf_base_color")):
+            mesh.add_attribute("vertex_bsdf_base_color", 3, dr.ravel(vertex_colors))
         param_keys.append("vertex_bsdf_base_color")
+        
+        if not(mesh.has_attribute("vertex_bsdf_roughness")):
+            mesh.add_attribute("vertex_bsdf_roughness", 1, dr.full(Float, m_roughness, Nv))
         param_keys.append("vertex_bsdf_roughness")
+        
         if self.has_metallic:
             assert m_metallic is not None, "`m_metallic` is not set!"
-            mesh.add_attribute("vertex_bsdf_metallic", 1, dr.full(Float, m_metallic, Nv))
+            if not(mesh.has_attribute("vertex_bsdf_metallic")):
+                mesh.add_attribute("vertex_bsdf_metallic", 1, dr.full(Float, m_metallic, Nv))
             param_keys.append("vertex_bsdf_metallic")
+
         if self.has_anisotropic:
             assert m_anisotropic is not None, "`m_anisotropic` is not set!"
-            mesh.add_attribute("vertex_bsdf_anisotropic", 1, dr.full(Float, m_anisotropic, Nv))
+            if not(mesh.has_attribute("vertex_bsdf_anisotropic")):
+                mesh.add_attribute("vertex_bsdf_anisotropic", 1, dr.full(Float, m_anisotropic, Nv))
             param_keys.append("vertex_bsdf_anisotropic")
+
         if self.has_spec_tint:
             assert m_spec_tint is not None, "`m_spec_tint` is not set!"
-            mesh.add_attribute("vertex_bsdf_spec_tint", 1, dr.full(Float, m_spec_tint, Nv))
+            if not(mesh.has_attribute("vertex_bsdf_spec_tint")):
+                mesh.add_attribute("vertex_bsdf_spec_tint", 1, dr.full(Float, m_spec_tint, Nv))
             param_keys.append("vertex_bsdf_spec_tint")
 
         return param_keys
@@ -549,6 +559,30 @@ class Diffuse:
 
         return dr.select((cos_theta_i > 0.0) & (cos_theta_o > 0.0), pdf, 0.0)
 
+    def initialize_mesh_attributes(
+            self,
+            mesh: mi.Mesh, 
+            m_base_color: mi.Color3f | list) -> list[str]:
+        '''
+        On a given input triangle mesh, initialize vertex attribute buffers for each of the optimizable 
+        BSDF parameters.
+        Input:
+            - mesh: mi.Mesh. The mesh whose material properties are to be optimized.
+            - m_base_color: list[float], size (3,). The initialization value for the mesh's base color.
+
+        Returns:
+            - param_keys: list[str]. List of mesh attribute names corresponding to the BSDF parameters.
+        '''
+        Nv = mesh.vertex_count()
+        color = mi.Color3f([float(x) for x in m_base_color])
+        vertex_colors = dr.gather(mi.Color3f, color, dr.zeros(UInt, Nv))
+
+        param_keys = []
+
+        if not(mesh.has_attribute("vertex_bsdf_base_color")):
+            mesh.add_attribute("vertex_bsdf_base_color", 3, dr.ravel(vertex_colors))
+        param_keys.append("vertex_bsdf_base_color")
+        return param_keys
 
 
 
@@ -560,6 +594,8 @@ def visualize_textures(scene: mi.Scene, init_ps = True):
 
     if init_ps:
         ps.init()
+        # ps.reset_camera_to_home_view()
+        ps.look_at([0,0,-4], [0,0,0])
 
     bsdf_keys = [
         'vertex_bsdf_base_color',

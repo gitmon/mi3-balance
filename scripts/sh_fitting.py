@@ -233,10 +233,8 @@ def visualize_fit(scene: mi.Scene, max_order: int):
     params.update()
     image, img_res = render_scene(scene, max_order)
 
-    image_out = np.stack((
-        mi.TensorXf(image.x, shape=(img_res[1], img_res[0])).numpy().T,
-        mi.TensorXf(image.y, shape=(img_res[1], img_res[0])).numpy().T,
-        mi.TensorXf(image.z, shape=(img_res[1], img_res[0])).numpy().T), axis=2)
+    image_out = mi.TensorXf(dr.ravel(image), shape=(img_res[0], img_res[1], 3))
+    image_out = image_out.numpy()
 
     ps.add_color_image_quantity("Image", image_out ** (1.0 / 2.2), enabled=True, show_fullscreen=True)
 
@@ -246,10 +244,8 @@ def visualize_fit(scene: mi.Scene, max_order: int):
         params.update()
         image, img_res = render_scene(scene, max_order)
 
-        image_out = np.stack((
-            mi.TensorXf(image.x, shape=(img_res[1], img_res[0])).numpy().T,
-            mi.TensorXf(image.y, shape=(img_res[1], img_res[0])).numpy().T,
-            mi.TensorXf(image.z, shape=(img_res[1], img_res[0])).numpy().T), axis=2)
+        image_out = mi.TensorXf(dr.ravel(image), shape=(img_res[0], img_res[1], 3))
+        image_out = image_out.numpy()
 
         ps.add_color_image_quantity("Image", image_out ** (1.0 / 2.2))
 

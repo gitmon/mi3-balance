@@ -26,7 +26,7 @@ def plot_mesh(mesh: mi.Mesh, label: str = None) -> ps.surface_mesh.SurfaceMesh:
     V, F = mesh.vertex_positions_buffer(), mesh.faces_buffer()
     V = V.numpy().reshape((-1,3))#.T
     F = F.numpy().reshape((-1,3))#.T
-    return ps.register_surface_mesh(label if label is not None else "Mesh", V, F, material='flat')
+    return ps.register_surface_mesh(label if label is not None else "Mesh", V, F, material='flat', edge_width=1.0)
 
 def plot_mesh_attributes(mesh: mi.Mesh, mesh_label: str, attrib_names: list[str], is_color: bool = False):
     m = plot_mesh(mesh, mesh_label)
@@ -41,7 +41,7 @@ def plot_mesh_attributes(mesh: mi.Mesh, mesh_label: str, attrib_names: list[str]
         domain = "vertices" if attrib_type == "vertex" else "faces"
 
         if attrib_size == 1:
-            m.add_scalar_quantity(attrib_label, values, defined_on=domain, enabled=False)
+            m.add_scalar_quantity(attrib_label, values, defined_on=domain, vminmax = (0.0, 1.0), enabled=False)
         elif attrib_size == 3:
             if is_color:
                 m.add_color_quantity(attrib_label, values.reshape(-1,3), defined_on=domain, enabled=True)
@@ -54,6 +54,5 @@ def plot_mesh_attributes(mesh: mi.Mesh, mesh_label: str, attrib_names: list[str]
 def plot_rays(rays: mi.Ray3f, label: str = None) -> ps.point_cloud.PointCloud:
     o, d = rays.o.numpy().T, rays.d.numpy().T
     point_cloud = ps.register_point_cloud(label if label is not None else "Rays", o)
-    print(type(point_cloud))
     point_cloud.add_vector_quantity("dirs", d, enabled=True)
     return point_cloud

@@ -210,10 +210,10 @@ def compute_loss(
         # Evaluate LHS of balance equation
         lhs = -radiance_cache.query_cached_Le(si)
 
-        lhs += radiance_cache.query_cached_Lo(si, sampler_rt, rng_state)
+        lhs += radiance_cache.query_cached_Lo(si, sampler_rt, rng_state)[0]
 
         # Evaluate RHS integral
-        Li, wi_local, si_flattened = radiance_cache.query_cached_Li(si, num_wi, sampler_rt, rng_state)
+        Li, wi_local, si_flattened = radiance_cache.query_cached_Li(si, num_wi, sampler_rt, rng_state)[:3]
 
         with dr.resume_grad():
             f_io = trainable_bsdf.eval(ctx, si = si_flattened, wo = wi_local)

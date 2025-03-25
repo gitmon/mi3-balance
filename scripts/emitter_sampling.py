@@ -4,9 +4,8 @@ sys.path.insert(0, '/home/jonathan/Documents/mi3-balance/build/python')
 import drjit as dr
 import mitsuba as mi
 from drjit.auto import Float, UInt, Bool
-from sh_fitting import get_sh_count
-from radiosity_sh import RadianceCacheMiSH, SceneSurfaceSampler
-from radiosity_rt import RadianceCacheMiRT
+from sh_fitting import get_sh_count, fit_sh_on_scene
+from radiosity_sh import SceneSurfaceSampler
 
 def balance_heuristic(pdf1: Float, pdf2: Float, n1: int = 1, n2: int = 1):
     return (n1 * pdf1) * dr.rcp(dr.fma(n1, pdf1, n2 * pdf2))
@@ -24,23 +23,34 @@ def compute_face_areas(mesh: mi.Mesh, face_idxs: mi.Point3u):
         return 0.5 * dr.norm(dr.cross(e0, e1))
 
 class EnergyPMF:
-    def __init__(self, rc: RadianceCacheMiSH):
-        self.build_energy_pmf(rc)
-        self.meshes = rc.scene.shapes_dr()
-        self.scene = rc.scene
+    def __init__(self, scene: mi.Scene):
+        self.build_energy_pmf(scene)
+        self.meshes = scene.shapes_dr()
+        # keep scene reference to perform ray intersection tests
+        self.scene = scene
 
-    def build_energy_pmf(self, rc: RadianceCacheMiSH) -> mi.DiscreteDistribution:
-        meshes = rc.scene.shapes_dr()
+    def build_energy_pmf(self, scene: mi.Scene) -> mi.DiscreteDistribution:
+        # Populate the meshes with SH coefficient data
+        print("Fitting spherical harmonics to scene...")
+
+        sh_order = 3
+        fit_sh_on_scene(scene, sh_order)
+
+        print("Fitting complete.")
+
+        # Compute triangle indexing data
+        meshes = scene.shapes_dr()
         mesh_active = meshes.is_mesh()
         face_counts = dr.cuda.ad.UInt(dr.select(mesh_active, mi.MeshPtr(meshes).face_count(), 0))
         mesh_start_indices = dr.prefix_reduce(dr.ReduceOp.Add, face_counts, exclusive=True)
         mesh_end_indices   = dr.prefix_reduce(dr.ReduceOp.Add, face_counts, exclusive=False)
 
+        # Compute per-triangle energies
         E_scene = dr.zeros(Float, mesh_end_indices[-1])
         for mesh_idx, mesh in enumerate(meshes):
             # Compute the outgoing energy from each mesh vertex as the sum of the squared SH coefficients
             vertex_energies = dr.zeros(Float, mesh.vertex_count())
-            for sh_idx in range(get_sh_count(rc.order)):
+            for sh_idx in range(get_sh_count(sh_order)):
                 vertex_coeffs = dr.unravel(mi.Color3f, mesh.attribute_buffer(f"vertex_Lo_coeffs_{sh_idx}"))
                 vertex_energies += dr.squared_norm(vertex_coeffs)
 
@@ -61,21 +71,8 @@ class EnergyPMF:
             end_idx = mesh_end_indices[mesh_idx]
             dr.scatter_add(E_scene, E_faces, dr.arange(UInt, start_idx, end_idx))
 
-        # # DEBUG: the scene-level array `E_scene` should simply be the concatenation of the meshes' energy-per-vertex arrays
-        # import numpy as np
-        # E_scene_np = []
-        # for mesh_idx, mesh in enumerate(meshes):
-        #     E_mesh = dr.zeros(Float, mesh.vertex_count())
-        #     for sh_idx in range(get_sh_count(rc.order)):
-        #         coeffs = dr.unravel(mi.Color3f, mesh.attribute_buffer(f"vertex_Lo_coeffs_{sh_idx}"))
-        #         E_mesh += dr.squared_norm(coeffs)
-        #     E_scene_np.append(E_mesh.numpy())
-
-        # E_scene_np = np.concatenate(E_scene_np)
-        # assert np.allclose(E_scene_np, E_scene.numpy()), "Scene vertex array is not correct!"
-
+        # Construct the probability distribution
         pmf = mi.DiscreteDistribution(E_scene)
-        
         self.pmf = pmf
         self.mesh_start_idxs = mesh_start_indices 
         self.mesh_end_idxs = mesh_end_indices
@@ -142,14 +139,13 @@ class EnergyPMF:
 
         # Find the index of the hit triangle in the energy PMF
         mesh_idx = dr.zeros(dr.cuda.ad.UInt, dr.width(wi_local))
-        mesh_ptrs = self.scene.shapes_dr()
-        for i, shape in enumerate(mesh_ptrs):
+        for i, shape in enumerate(self.meshes):
             mesh_idx[pi.shape == shape] = i
         idx_offsets = dr.gather(type(self.mesh_start_idxs), self.mesh_start_idxs, mesh_idx)
         global_face_idx = dr.select(active, local_face_idx + idx_offsets, 0)
         
         # Evaluate the hit probability
-        meshes = dr.gather(mi.MeshPtr, mesh_ptrs, mesh_idx)
+        meshes = dr.gather(mi.MeshPtr, self.meshes, mesh_idx)
         fi = meshes.face_indices(local_face_idx)
         pdf = dr.select(active, 
                         self.pmf.eval_pmf_normalized(global_face_idx) / compute_face_areas(meshes, fi),
@@ -179,13 +175,19 @@ class EnergyPMF:
         print((pdf - pdf_ref).numpy())
 
 
-        
-import numpy as np
-
-class RadianceCacheEM(RadianceCacheMiRT):
+class RadianceCacheEM:
     def __init__(self, scene: mi.Scene, spp_per_wo: int, spp_per_wi: int):
-        super().__init__(scene, spp_per_wo, spp_per_wi)
-        self.energy_pmf = EnergyPMF(RadianceCacheMiSH(scene))
+        '''
+        Inputs:
+            - scene: Scene. The Mitsuba scene.
+            - spp_per_wo: int. The number of pathtrace samples to use per Lo ray.
+            - spp_per_wi: int. The number of pathtrace samples to use per Li ray.
+        '''
+        self.scene = scene
+        self.integrator = scene.integrator()
+        self.spp_per_wo = spp_per_wo
+        self.spp_per_wi = spp_per_wi
+        self.energy_pmf = EnergyPMF(scene)
 
     def pathtrace(self, rays: mi.Ray3f, spp: int, sampler_rt: mi.Sampler, rng_state: int, active: Bool = None) -> tuple[mi.Color3f, int]:
         '''
@@ -206,7 +208,11 @@ class RadianceCacheEM(RadianceCacheMiRT):
         L = dr.block_reduce(dr.ReduceOp.Add, colors, block_size = spp) / spp
         return L, rng_state
 
-    def query_cached_Lo(self, si: mi.SurfaceInteraction3f, sampler_rt: mi.Sampler, rng_state: int = 0)  -> tuple[mi.Color3f, Bool, int]:
+    def eval_Le(self, si: mi.SurfaceInteraction3f) -> mi.Color3f:
+        mesh = si.shape
+        return dr.select(mesh.is_emitter(), mesh.emitter().eval(si), dr.zeros(mi.Color3f))
+
+    def eval_Lo(self, si: mi.SurfaceInteraction3f, sampler_rt: mi.Sampler, rng_state: int = 0)  -> tuple[mi.Color3f, Bool, int]:
         '''
         Inputs:
             - sampler: Sampler. The pseudo-random number generator.
@@ -235,7 +241,7 @@ class RadianceCacheEM(RadianceCacheMiRT):
         return Lo, active, rng_state
 
 
-    def query_cached_Li(self, si_wide: mi.SurfaceInteraction3f, sampler_rt: mi.Sampler, rng_state: int = 0, emitter_sampling: bool = True) \
+    def eval_Li(self, si_wide: mi.SurfaceInteraction3f, sampler_rt: mi.Sampler, rng_state: int = 0, emitter_sampling: bool = True) \
         -> tuple[mi.Color3f, mi.Vector3f, Bool, int]:
         '''
         Inputs:
@@ -287,14 +293,14 @@ class RadianceCacheEM(RadianceCacheMiRT):
         # different MC samples and average them to get the outgoing radiance.
         Li, rng_state = self.pathtrace(wi_rays, self.spp_per_wi, sampler_rt, rng_state, active)
         Li *= wi_weight
-        return Li, wi_local, active, rng_state #, wi_rays
-    
+        return Li, wi_local, active, rng_state
 
-from visualizer import plot_rays
-from vertex_bsdf import visualize_textures
-import polyscope as ps
 
-def compute_loss_DEBUG(
+# from visualizer import plot_rays
+# from vertex_bsdf import visualize_textures
+# import polyscope as ps
+
+def compute_loss(
         scene_sampler: SceneSurfaceSampler, 
         radiance_cache: RadianceCacheEM, 
         trainable_bsdf: mi.BSDF, 
@@ -312,8 +318,6 @@ def compute_loss_DEBUG(
         - num_wi: int. The number of incident directions per surface point to use to calculate the radiosity integral.
     Outputs:
         - loss: Float. The scalar loss.
-    
-    # NOTE: we might be able to further re-arrange the steps to cut down/consolidate kernel launches.
     '''
     with dr.suspend_grad():
         # Temp workaround. TODO: avoid initializing a new sampler at each iteration
@@ -335,8 +339,8 @@ def compute_loss_DEBUG(
             rhs = f_emitter * delta_emitter_Li
 
         # Evaluate LHS of balance equation
-        Le = radiance_cache.query_cached_Le(si)
-        Lo, active_si, rng_state = radiance_cache.query_cached_Lo(si, sampler_rt, rng_state)
+        Le = radiance_cache.eval_Le(si)
+        Lo, active_si, rng_state = radiance_cache.eval_Lo(si, sampler_rt, rng_state)
         lhs = -Le + Lo
 
         # Build the "wide" `si`
@@ -347,17 +351,16 @@ def compute_loss_DEBUG(
         #
         #     `si_wide` has the form:          v---- NUM_WI copies ---v
         # [s0, ..., s0, s1, ..., s1,    ...   sN-1,      ...,       sN-1]   (contiguous order)
-        num_points = dr.width(si)
         si_wide = dr.gather(type(si), si, 
                             index = dr.repeat(dr.arange(UInt, num_points), num_wi), 
                             mode = dr.ReduceMode.Local)
 
         # Evaluate RHS integral
         # Light sampling
-        Li_em, wi_em, active_em, rng_state = radiance_cache.query_cached_Li(si_wide, sampler_rt, rng_state, True)
+        Li_em, wi_em, active_em, rng_state = radiance_cache.eval_Li(si_wide, sampler_rt, rng_state, True)
 
         # Material/cosine sampling
-        Li_mat, wi_mat, active_mat, rng_state = radiance_cache.query_cached_Li(si_wide, sampler_rt, rng_state, False)
+        Li_mat, wi_mat, active_mat, rng_state = radiance_cache.eval_Li(si_wide, sampler_rt, rng_state, False)
 
         with dr.resume_grad():
             integrand = Li_mat * trainable_bsdf.eval(ctx, si = si_wide, wo = wi_mat, active = active_mat) \
@@ -367,26 +370,100 @@ def compute_loss_DEBUG(
             loss = 0.5 * dr.mean(residuals)
 
 
-
-            if False: #plot or (loss.numpy().item() > 0.01):
-                err = dr.squared_norm(lhs - rhs).numpy()
-                idx = np.where(err > 0.01)[0]
-                bad_si = dr.gather(mi.SurfaceInteraction3f, si, idx)
+            # if False: #plot or (loss.numpy().item() > 0.01):
+            #     err = dr.squared_norm(lhs - rhs).numpy()
+            #     idx = np.where(err > 0.01)[0]
+            #     bad_si = dr.gather(mi.SurfaceInteraction3f, si, idx)
                 
-                # print(np.histogram(err, bins = np.logspace(-4,2, base=10, num=13)))
-                print(f"Max error at index {idx} (err = {err[idx]}).")
-                print(f"lhs = {lhs.numpy()[:,idx]}")
-                print(f"rhs = {rhs.numpy()[:,idx]}")
-                print(bad_si)
-                print(f"RNG: {rng_state}")
+            #     # print(np.histogram(err, bins = np.logspace(-4,2, base=10, num=13)))
+            #     print(f"Max error at index {idx} (err = {err[idx]}).")
+            #     print(f"lhs = {lhs.numpy()[:,idx]}")
+            #     print(f"rhs = {rhs.numpy()[:,idx]}")
+            #     print(bad_si)
+            #     print(f"RNG: {rng_state}")
 
-                ps.init()
-                visualize_textures(radiance_cache.scene, False)
-                plot_rays(wi_rays, "wi")
-                si_cloud = ps.register_point_cloud("si", si.p.numpy().T)
-                si_cloud.add_vector_quantity("wo", si.to_world(si.wi).numpy().T)
-                points = ps.register_point_cloud("Bad si", bad_si.p.numpy().T)
-                points.add_vector_quantity("wo", bad_si.to_world(bad_si.wi).numpy().T)
-                ps.show()
+            #     ps.init()
+            #     visualize_textures(radiance_cache.scene, False)
+            #     plot_rays(wi_rays, "wi")
+            #     si_cloud = ps.register_point_cloud("si", si.p.numpy().T)
+            #     si_cloud.add_vector_quantity("wo", si.to_world(si.wi).numpy().T)
+            #     points = ps.register_point_cloud("Bad si", bad_si.p.numpy().T)
+            #     points.add_vector_quantity("wo", bad_si.to_world(bad_si.wi).numpy().T)
+            #     ps.show()
             
             return loss
+        
+
+def compute_loss_multiLo(
+        scene_sampler: SceneSurfaceSampler, 
+        radiance_cache: RadianceCacheEM, 
+        trainable_bsdf: mi.BSDF, 
+        num_points: int = 1,
+        num_wi: int = 256, 
+        num_wo: int = 4,
+        rng_state: int = 0,
+        ):
+    '''
+    Inputs:
+        - scene_sampler: SceneSurfaceSampler. The scene sampler draws random points from the scene's surfaces.
+        - radiance_cache: RadianceCache. Data structure containing the emissive surface data.
+        - trainable_bsdf: mi.BSDF. 
+        - num_points: int. The number of surface point samples to use.
+        - num_wi: int. The number of incident directions per surface point to use to calculate the radiosity integral.
+    Outputs:
+        - loss: Float. The scalar loss.
+    '''
+    loss = Float(0.0)
+    dr.enable_grad(loss)
+
+    with dr.suspend_grad():
+        sampler_rt: mi.Sampler = mi.load_dict({'type': 'independent'})
+
+        # Sample `NUM_POINTS` different surface points
+        si, delta_emitter_sample, delta_emitter_Li, rng_state = scene_sampler.sample(num_points, sampler_rt, rng_state)
+
+        # Build the "wide" `si`
+        si_wide = dr.gather(type(si), si, dr.repeat(dr.arange(UInt, num_points), num_wi), dr.ReduceMode.Local)
+
+        # RHS: Evaluate incident directions
+        Li_em, wi_em, active_em, rng_state = radiance_cache.eval_Li(si_wide, sampler_rt, rng_state, True)
+        Li_mat, wi_mat, active_mat, rng_state = radiance_cache.eval_Li(si_wide, sampler_rt, rng_state, False)
+
+        # RHS delta term: Perform ray visibility test from `si` to the delta emitter
+        vis_rays = si.spawn_ray(delta_emitter_sample.d)
+        vis_rays.maxt = delta_emitter_sample.dist
+        emitter_occluded = radiance_cache.scene.ray_test(vis_rays)
+        delta_emitter_Li &= ~emitter_occluded
+        delta_emitter_wi = si.to_local(delta_emitter_sample.d)
+
+        ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
+        # Loop through the outgoing directions
+        for _ in range(num_wo):
+            rhs = dr.zeros(mi.Color3f, num_points)
+
+            # RHS: compute the delta emitter term
+            with dr.resume_grad():
+                f_emitter = trainable_bsdf.eval(ctx, si, wo = delta_emitter_wi)
+                rhs += f_emitter * delta_emitter_Li
+
+            # LHS: evaluate the emissive and outgoing radiances
+            Le = radiance_cache.eval_Le(si)
+            Lo, active_si, rng_state = radiance_cache.eval_Lo(si, sampler_rt, rng_state)
+            lhs = -Le + Lo
+
+            # RHS: integrate over the incident directions and update the loss
+            with dr.resume_grad():
+                integrand = Li_mat * trainable_bsdf.eval(ctx, si = si_wide, wo = wi_mat, active = active_mat) \
+                           + Li_em * trainable_bsdf.eval(ctx, si = si_wide, wo = wi_em,  active = active_em)
+                rhs += dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
+                residuals = dr.select(active_si, dr.squared_norm(lhs - rhs), 0.0)
+                loss += 0.5 * dr.mean(residuals) / num_wo
+
+            # Pick new outgoing directions to sample
+            sampler_rt.seed(rng_state, num_points); rng_state += 0x00FF_FFFF
+            si.wi = mi.warp.square_to_cosine_hemisphere(sampler_rt.next_2d())
+
+            # Update `si_wide` with the new directions
+            si_wide.wi = dr.gather(mi.Vector3f, si.wi, dr.repeat(dr.arange(UInt, num_points), num_wi), dr.ReduceMode.Local)
+
+    return loss
