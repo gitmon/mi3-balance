@@ -13,9 +13,16 @@ def is_delta_emitter(emitter: mi.Emitter):
            (emitter.m_flags & mi.EmitterFlags.DeltaDirection)
 
 class SceneSurfaceSampler:
-    def __init__(self, scene: mi.Scene):
+    def __init__(self, scene: mi.Scene, method="equiarea"):
         shape_ptrs = scene.shapes_dr()
-        self.distribution = mi.DiscreteDistribution(shape_ptrs.surface_area())
+        if method == "equiarea":
+            # probability is proportional to mesh area
+            self.distribution = mi.DiscreteDistribution(shape_ptrs.surface_area())
+        elif method == "mesh-res":
+            # probability is inversely proportional to avg_triangle_area
+            prims_per_shape = dr.select(shape_ptrs.is_mesh(), mi.MeshPtr(shape_ptrs).face_count(), 1)
+            mean_prim_area = shape_ptrs.surface_area() / prims_per_shape
+            self.distribution = mi.DiscreteDistribution(dr.rcp(mean_prim_area))
         self.shape_ptrs = shape_ptrs
         self.has_delta_emitters = dr.any((scene.emitters_dr().flags() & UInt(mi.EmitterFlags.Delta)) > 0)
         self.delta_emitters = [emitter for emitter in scene.emitters() if is_delta_emitter(emitter)]
