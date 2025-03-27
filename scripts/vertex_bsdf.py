@@ -1,93 +1,9 @@
 import drjit as dr
 import mitsuba as mi
 from drjit.auto import Float, UInt, Bool
+from bsdf_utils import calc_dist_params, mac_mic_compatibility, schlick_weight, principled_fresnel
 
-### Helper functions from `principledhelpers.h`
-
-def mulsign_neg(a, b):
-    # mulsign_neg(x) should be equiv. to -mulsign(x)
-    return -dr.mulsign(a, b)
-
-def fnmadd(a, b, c):
-    # `fnmadd(a,b,c)` == `-a * b + c`, which can be implemented as either
-    # `fmadd(-a,b,c)` or `fmadd(a,-b,c)`
-    return dr.fma(-a, b, c)
-
-def calc_dist_params(anisotropic: Float, roughness: Float, has_anisotropic: bool) -> tuple[Float, Float]:
-    roughness_2 = dr.square(roughness)
-    if not(has_anisotropic):
-        a = dr.maximum(0.001, roughness_2)
-        return (a, a)
-    aspect = dr.sqrt(1.0 - 0.9 * anisotropic)
-    return ( dr.maximum(0.001, roughness_2 / aspect),
-             dr.maximum(0.001, roughness_2 * aspect))
-
-def mac_mic_compatibility(m: mi.Vector3f, wi: mi.Vector3f, wo: mi.Vector3f, cos_theta_i: Float, reflection: bool) -> Bool:
-    # NOTE: elementwise AND (this syntax should be fine)
-    if reflection:
-        return (dr.dot(wi, dr.mulsign(m, cos_theta_i)) > 0.0) & \
-            (dr.dot(wo, dr.mulsign(m, cos_theta_i)) > 0.0)
-    else:
-        return (dr.dot(wi, dr.mulsign(m, cos_theta_i)) > 0.0) & \
-            (dr.dot(wo, mulsign_neg(m, cos_theta_i)) > 0.0)
-
-def schlick_R0_eta(eta: Float) -> Float:
-    return dr.square((eta - 1.0) / (eta + 1.0))
-
-def schlick_weight(cos_i: Float) -> Float:
-    m = dr.clip(1.0 - cos_i, 0.0, 1.0)
-    return dr.square(dr.square(m)) * m
-
-def calc_schlick(R0: mi.Color3f, cos_theta_i: Float, eta: Float) -> mi.Color3f:
-    outside_mask = cos_theta_i >= 0.0
-    rcp_eta = dr.rcp(eta)
-    eta_it  = dr.select(outside_mask, eta, rcp_eta)
-    eta_ti  = dr.select(outside_mask, rcp_eta, eta)
-
-    cos_theta_t_sqr = fnmadd(
-            fnmadd(cos_theta_i, cos_theta_i, 1.0), dr.square(eta_ti), 1.0)
-    cos_theta_t = dr.safe_sqrt(cos_theta_t_sqr)
-    return dr.select(
-            eta_it > 1.0,
-            dr.lerp(schlick_weight(dr.abs(cos_theta_i)), 1.0, R0),
-            dr.lerp(schlick_weight(cos_theta_t), 1.0, R0))
-
-def principled_fresnel(
-        F_dielectric: Float, 
-        metallic: Float,
-        spec_tint: Float,
-        base_color: mi.Color3f,
-        lum: Float, cos_theta_i: Float,
-        front_side: Bool,
-        bsdf: Float, eta: Float,
-        has_metallic: bool, has_spec_tint: bool) -> mi.Color3f:
-    # Outside mask based on micro surface
-    outside_mask = cos_theta_i >= 0.0
-    rcp_eta = dr.rcp(eta)
-    eta_it  = dr.select(outside_mask, eta, rcp_eta)
-    # TODO: does the width need to be set?
-    F_schlick = mi.Color3f(0.0) 
-
-    # Metallic component based on Schlick.
-    if has_metallic:
-        F_schlick += metallic * calc_schlick(base_color, cos_theta_i, eta)
-
-    # Tinted dielectric component based on Schlick.
-    if has_spec_tint:
-        c_tint = dr.select(lum > 0.0, base_color / lum, 1.0)
-        F0_spec_tint = c_tint * schlick_R0_eta(eta_it)
-        F_schlick += \
-                (1.0 - metallic) * spec_tint * \
-                calc_schlick(F0_spec_tint, cos_theta_i, eta)
-
-    # Front side fresnel
-    F_front = (1.0 - metallic) * (1.0 - spec_tint) * F_dielectric + F_schlick
-    # For back side there is no tint or metallic, just true dielectric
-    # fresnel.
-    return dr.select(front_side, F_front, bsdf * F_dielectric)
-
-
-### Mesh attribute query functions
+### --------------- Mesh attribute query functions ---------------
 
 def eval_base_color(si: mi.SurfaceInteraction3f, active: Bool) -> mi.Color3f:
     return si.shape.eval_attribute_3("vertex_bsdf_base_color", si, active)
@@ -105,7 +21,7 @@ def eval_spec_tint(si: mi.SurfaceInteraction3f, active: Bool) -> Float:
     return si.shape.eval_attribute_1("vertex_bsdf_spec_tint", si, active)
 
 
-### Method implementations for principled BSDF
+### --------------- Principled BSDF implementations --------------- 
 
 def bsdf_eval(
             si: mi.SurfaceInteraction3f, 
@@ -431,7 +347,7 @@ def bsdf_sample(
     return (bs, result / bs.pdf & active)
 
 
-# Main BSDF class
+# ----------------------- BSDF class: Principled -----------------------
 
 class Principled:
     '''
@@ -516,6 +432,7 @@ class Principled:
 
         return param_keys
 
+# ----------------------- BSDF class: Lambertian diffuse -----------------------
 
 class Diffuse:
     def __init__(self):
@@ -583,30 +500,3 @@ class Diffuse:
             mesh.add_attribute("vertex_bsdf_base_color", 3, dr.ravel(vertex_colors))
         param_keys.append("vertex_bsdf_base_color")
         return param_keys
-
-
-
-import polyscope as ps
-from visualizer import plot_mesh_attributes
-
-def visualize_textures(scene: mi.Scene, init_ps = True):
-    meshes = [shape for shape in scene.shapes() if shape.is_mesh()]
-
-    if init_ps:
-        ps.init()
-        # ps.reset_camera_to_home_view()
-        ps.look_at([0,0,-4], [0,0,0])
-
-    bsdf_keys = [
-        'vertex_bsdf_base_color',
-        'vertex_bsdf_roughness',
-        'vertex_bsdf_metallic',
-        'vertex_bsdf_anisotropic',
-        'vertex_bsdf_spec_tint',
-        ]
-    for idx, mesh in enumerate(meshes):
-        keys = [key for key in bsdf_keys if mesh.has_attribute(key)]
-        plot_mesh_attributes(mesh, f"mesh{idx}", keys, is_color=True)
-
-    if init_ps:
-        ps.show()

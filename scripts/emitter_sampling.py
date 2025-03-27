@@ -157,7 +157,7 @@ class EnergyPMF:
         # Compute geometry term for this hit point
         dist = pi.t
         si_triangle = pi.compute_surface_interaction(ray, active=active)
-        # TODO: sh_frame.N or si.N?
+        # TODO: sh_frame.n or si.n?
         # cos_theta_o = dr.abs(dr.dot(si_triangle.sh_frame.n, -d_world))
         cos_theta_o = dr.abs(dr.dot(si_triangle.n, -d_world))   
         G = dr.select(active & (dist > 0.0), cos_theta_o * dr.rcp(dist * dist), 0.0)
@@ -200,7 +200,7 @@ class RadianceCacheEM:
         self.spp_per_wi = spp_per_wi
         self.energy_pmf = EnergyPMF(scene)
 
-    def pathtrace(self, rays: mi.Ray3f, spp: int, sampler_rt: mi.Sampler, rng_state: int, active: Bool = None) -> tuple[mi.Color3f, int]:
+    def _pathtrace(self, rays: mi.Ray3f, spp: int, sampler_rt: mi.Sampler, rng_state: int, active: Bool = None) -> tuple[mi.Color3f, int]:
         '''
         Inputs:
             - TODO
@@ -248,11 +248,11 @@ class RadianceCacheEM:
         # Pathtrace along `-wo` to get the radiance when looking at `A`. For each `Lo_ray`,
         # compute `SPP_LO` different pathtraced samples and average them to get the outgoing 
         # radiance.
-        Lo, rng_state = self.pathtrace(Lo_rays, self.spp_per_wo, sampler_rt, rng_state, active)
+        Lo, rng_state = self._pathtrace(Lo_rays, self.spp_per_wo, sampler_rt, rng_state, active)
         return Lo, active, rng_state
 
 
-    def eval_Li(self, si_wide: mi.SurfaceInteraction3f, sampler_rt: mi.Sampler, rng_state: int = 0, emitter_sampling: bool = True) \
+    def eval_Li(self, si_wide: mi.SurfaceInteraction3f, sampler_rt: mi.Sampler, rng_state: int = 0, sampling_method: SamplingMethod = SamplingMethod.Cosine) \
         -> tuple[mi.Color3f, mi.Vector3f, Bool, int]:
         '''
         Inputs:
@@ -269,7 +269,7 @@ class RadianceCacheEM:
         sampler_rt.seed(rng_state, dr.width(si_wide)); rng_state += 0x00FF_FFFF
         uv = sampler_rt.next_2d()
 
-        if emitter_sampling:
+        if sampling_method == SamplingMethod.Emitter:
             # light_pdf is expressed in units of solid angle
             em_wi, em_weight, em_pdf = self.energy_pmf.sample(si_wide, sampler_rt.next_1d(), uv)
             # assert not(dr.any((light_pdf == 0.0) & (light_weight != 0.0)))
@@ -280,10 +280,7 @@ class RadianceCacheEM:
             mis_weight = dr.select(hemi_pdf > 0.0, balance_heuristic(em_pdf, hemi_pdf), 1.0)
             em_weight *= mis_weight 
             wi_local, wi_pdf, wi_weight = em_wi, em_pdf, em_weight
-
-            # # DEBUG
-            # self.energy_pmf.test(si_wide, sampler_rt.next_1d(), sampler_rt.next_2d())
-        else:
+        elif sampling_method == SamplingMethod.Cosine:
             hemi_wi = mi.warp.square_to_cosine_hemisphere(uv)
             hemi_pdf = dr.maximum(0.0, mi.warp.square_to_cosine_hemisphere_pdf(hemi_wi))
             hemi_weight = dr.select(hemi_pdf > 0.0, dr.rcp(hemi_pdf), 0.0)
@@ -295,6 +292,8 @@ class RadianceCacheEM:
             mis_weight = dr.select(em_pdf > 0.0, balance_heuristic(hemi_pdf, em_pdf), 1.0)
             hemi_weight *= mis_weight
             wi_local, wi_pdf, wi_weight = hemi_wi, hemi_pdf, hemi_weight
+        else:
+            raise NotImplementedError()
 
         assert not(dr.any((wi_pdf == 0.0) & (wi_weight != 0.0)))
 
@@ -303,7 +302,7 @@ class RadianceCacheEM:
 
         # Compute Li for each of the incident directions. For each `Li_ray`, trace `SPP_LI` 
         # different MC samples and average them to get the outgoing radiance.
-        Li, rng_state = self.pathtrace(wi_rays, self.spp_per_wi, sampler_rt, rng_state, active)
+        Li, rng_state = self._pathtrace(wi_rays, self.spp_per_wi, sampler_rt, rng_state, active)
         Li *= wi_weight
         return Li, wi_local, active, rng_state
 
@@ -376,17 +375,14 @@ class RadianceCacheEM:
 
         # Compute Li for each of the incident directions. For each `Li_ray`, trace `SPP_LI` 
         # different MC samples and average them to get the outgoing radiance.
-        Li, rng_state = self.pathtrace(wi_rays, self.spp_per_wi, sampler_rt, rng_state, active)
-        
-        assert not(dr.any(dr.isnan(Li), axis=None))
-
+        Li, rng_state = self._pathtrace(wi_rays, self.spp_per_wi, sampler_rt, rng_state, active)
         Li *= wi_weight
 
         return Li, wi_local, active, rng_state
 
 
 # from visualizer import plot_rays
-# from vertex_bsdf import visualize_textures
+# from bsdf_utils import ps_visualize_textures
 # import polyscope as ps
 # import numpy as np
 
@@ -396,102 +392,22 @@ def compute_loss(
         trainable_bsdf: mi.BSDF, 
         num_points: int = 1,
         num_wi: int = 256, 
+        num_wo: int = 1,
         rng_state: int = 0,
-        plot: bool = False
         ):
-    '''
-    Inputs:
-        - scene_sampler: SceneSurfaceSampler. The scene sampler draws random points from the scene's surfaces.
-        - radiance_cache: RadianceCache. Data structure containing the emissive surface data.
-        - trainable_bsdf: mi.BSDF. 
-        - num_points: int. The number of surface point samples to use.
-        - num_wi: int. The number of incident directions per surface point to use to calculate the radiosity integral.
-    Outputs:
-        - loss: Float. The scalar loss.
-    '''
-    with dr.suspend_grad():
-        # Temp workaround. TODO: avoid initializing a new sampler at each iteration
-        sampler_rt: mi.Sampler = mi.load_dict({'type': 'independent'})
+    if radiance_cache.scene.environment() is not None:
+        return _compute_loss_envmap(scene_sampler, radiance_cache, trainable_bsdf, num_points, num_wi, num_wo, rng_state)
+    
+    return _compute_loss(scene_sampler, radiance_cache, trainable_bsdf, num_points, num_wi, num_wo, rng_state)
 
-        # Sample `NUM_POINTS` different surface points
-        si, delta_emitter_sample, delta_emitter_Li, rng_state = scene_sampler.sample(num_points, sampler_rt, rng_state)
-
-        # Evaluate RHS scene emitter contribution
-        ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
-
-        # perform a ray visibility test from `si` to the delta emitter
-        vis_rays = si.spawn_ray(delta_emitter_sample.d)
-        vis_rays.maxt = delta_emitter_sample.dist
-        emitter_occluded = radiance_cache.scene.ray_test(vis_rays)
-        delta_emitter_Li &= ~emitter_occluded
-        with dr.resume_grad():
-            f_emitter = trainable_bsdf.eval(ctx, si, wo = si.to_local(delta_emitter_sample.d))
-            rhs = f_emitter * delta_emitter_Li
-
-        # Evaluate LHS of balance equation
-        Le = radiance_cache.eval_Le(si)
-        Lo, active_si, rng_state = radiance_cache.eval_Lo(si, sampler_rt, rng_state)
-        lhs = -Le + Lo
-
-        # Build the "wide" `si`
-        #     For each surface point `si`, we should sample `num_wi` incident directions.
-        # `wi` can be thought of as a 2D matrix[NUM_POINTS, num_wi] while `si` is an 
-        # array[NUM_POINTS]. The latter needs to be broadcasted to match the shape of `wi`, 
-        # which is done using the `gather()` (aka "widen") operation.
-        #
-        #     `si_wide` has the form:          v---- NUM_WI copies ---v
-        # [s0, ..., s0, s1, ..., s1,    ...   sN-1,      ...,       sN-1]   (contiguous order)
-        si_wide = dr.gather(type(si), si, 
-                            index = dr.repeat(dr.arange(UInt, num_points), num_wi), 
-                            mode = dr.ReduceMode.Local)
-
-        # Evaluate RHS integral
-        # Light sampling
-        Li_em, wi_em, active_em, rng_state = radiance_cache.eval_Li(si_wide, sampler_rt, rng_state, True)
-
-        # Material/cosine sampling
-        Li_mat, wi_mat, active_mat, rng_state = radiance_cache.eval_Li(si_wide, sampler_rt, rng_state, False)
-
-        with dr.resume_grad():
-            integrand = Li_mat * trainable_bsdf.eval(ctx, si = si_wide, wo = wi_mat, active = active_mat) \
-                       + Li_em * trainable_bsdf.eval(ctx, si = si_wide, wo = wi_em,  active = active_em)
-            rhs += dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
-            residuals = dr.select(active_si, dr.squared_norm(lhs - rhs), 0.0)
-            loss = 0.5 * dr.mean(residuals)
-
-
-            # if False: #plot or (loss.numpy().item() > 0.01):
-            #     err = dr.squared_norm(lhs - rhs).numpy()
-            #     idx = np.where(err > 0.01)[0]
-            #     bad_si = dr.gather(mi.SurfaceInteraction3f, si, idx)
-                
-            #     # print(np.histogram(err, bins = np.logspace(-4,2, base=10, num=13)))
-            #     print(f"Max error at index {idx} (err = {err[idx]}).")
-            #     print(f"lhs = {lhs.numpy()[:,idx]}")
-            #     print(f"rhs = {rhs.numpy()[:,idx]}")
-            #     print(bad_si)
-            #     print(f"RNG: {rng_state}")
-
-            #     ps.init()
-            #     visualize_textures(radiance_cache.scene, False)
-            #     plot_rays(wi_rays, "wi")
-            #     si_cloud = ps.register_point_cloud("si", si.p.numpy().T)
-            #     si_cloud.add_vector_quantity("wo", si.to_world(si.wi).numpy().T)
-            #     points = ps.register_point_cloud("Bad si", bad_si.p.numpy().T)
-            #     points.add_vector_quantity("wo", bad_si.to_world(bad_si.wi).numpy().T)
-            #     ps.show()
-            
-            return loss
-        
-
-def compute_loss_multiLo(
+def _compute_loss(
         scene_sampler: SceneSurfaceSampler, 
         radiance_cache: RadianceCacheEM, 
         trainable_bsdf: mi.BSDF, 
-        num_points: int = 1,
-        num_wi: int = 256, 
-        num_wo: int = 4,
-        rng_state: int = 0,
+        num_points: int,
+        num_wi: int,
+        num_wo: int,
+        rng_state: int,
         ):
     '''
     Inputs:
@@ -507,17 +423,24 @@ def compute_loss_multiLo(
     dr.enable_grad(loss)
 
     with dr.suspend_grad():
-        sampler_rt: mi.Sampler = mi.load_dict({'type': 'independent'})
+        sampler: mi.Sampler = mi.load_dict({'type': 'independent'})
 
         # Sample `NUM_POINTS` different surface points
-        si, delta_emitter_sample, delta_emitter_Li, rng_state = scene_sampler.sample(num_points, sampler_rt, rng_state)
+        si, delta_emitter_sample, delta_emitter_Li, rng_state = scene_sampler.sample(num_points, sampler, rng_state)
 
         # Build the "wide" `si`
+        #     For each surface point `si`, we should sample `num_wi` incident directions.
+        # `wi` can be thought of as a 2D matrix[NUM_POINTS, num_wi] while `si` is an 
+        # array[NUM_POINTS]. The latter needs to be broadcasted to match the shape of `wi`, 
+        # which is done using the `gather()` (aka "widen") operation.
+        #
+        #     `si_wide` has the form:          v---- NUM_WI copies ---v
+        # [s0, ..., s0, s1, ..., s1,    ...   sN-1,      ...,       sN-1]   (contiguous order)
         si_wide = dr.gather(type(si), si, dr.repeat(dr.arange(UInt, num_points), num_wi), dr.ReduceMode.Local)
 
         # RHS: Evaluate incident directions
-        Li_em, wi_em, active_em, rng_state = radiance_cache.eval_Li(si_wide, sampler_rt, rng_state, True)
-        Li_mat, wi_mat, active_mat, rng_state = radiance_cache.eval_Li(si_wide, sampler_rt, rng_state, False)
+        Li_em, wi_em, active_em, rng_state    = radiance_cache.eval_Li(si_wide, sampler, rng_state, SamplingMethod.Emitter)
+        Li_mat, wi_mat, active_mat, rng_state = radiance_cache.eval_Li(si_wide, sampler, rng_state, SamplingMethod.Cosine)
 
         # RHS delta term: Perform ray visibility test from `si` to the delta emitter
         vis_rays = si.spawn_ray(delta_emitter_sample.d)
@@ -538,7 +461,7 @@ def compute_loss_multiLo(
 
             # LHS: evaluate the emissive and outgoing radiances
             Le = radiance_cache.eval_Le(si)
-            Lo, active_si, rng_state = radiance_cache.eval_Lo(si, sampler_rt, rng_state)
+            Lo, active_si, rng_state = radiance_cache.eval_Lo(si, sampler, rng_state)
             lhs = -Le + Lo
 
             # RHS: integrate over the incident directions and update the loss
@@ -550,23 +473,43 @@ def compute_loss_multiLo(
                 loss += 0.5 * dr.mean(residuals) / num_wo
 
             # Pick new outgoing directions to sample
-            sampler_rt.seed(rng_state, num_points); rng_state += 0x00FF_FFFF
-            si.wi = mi.warp.square_to_cosine_hemisphere(sampler_rt.next_2d())
+            sampler.seed(rng_state, num_points); rng_state += 0x00FF_FFFF
+            si.wi = mi.warp.square_to_cosine_hemisphere(sampler.next_2d())
 
             # Update `si_wide` with the new directions
             si_wide.wi = dr.gather(mi.Vector3f, si.wi, dr.repeat(dr.arange(UInt, num_points), num_wi), dr.ReduceMode.Local)
 
+            # if False: #plot or (loss.numpy().item() > 0.01):
+            #     err = dr.squared_norm(lhs - rhs).numpy()
+            #     idx = np.where(err > 0.01)[0]
+            #     bad_si = dr.gather(mi.SurfaceInteraction3f, si, idx)
+                
+            #     # print(np.histogram(err, bins = np.logspace(-4,2, base=10, num=13)))
+            #     print(f"Max error at index {idx} (err = {err[idx]}).")
+            #     print(f"lhs = {lhs.numpy()[:,idx]}")
+            #     print(f"rhs = {rhs.numpy()[:,idx]}")
+            #     print(bad_si)
+            #     print(f"RNG: {rng_state}")
+
+            #     ps.init()
+            #     ps_visualize_textures(radiance_cache.scene, False)
+            #     plot_rays(wi_rays, "wi")
+            #     si_cloud = ps.register_point_cloud("si", si.p.numpy().T)
+            #     si_cloud.add_vector_quantity("wo", si.to_world(si.wi).numpy().T)
+            #     points = ps.register_point_cloud("Bad si", bad_si.p.numpy().T)
+            #     points.add_vector_quantity("wo", bad_si.to_world(bad_si.wi).numpy().T)
+            #     ps.show()            
     return loss
 
 
-def compute_loss_multiLo_envmap(
+def _compute_loss_envmap(
         scene_sampler: SceneSurfaceSampler, 
         radiance_cache: RadianceCacheEM, 
         trainable_bsdf: mi.BSDF, 
-        num_points: int = 1,
-        num_wi: int = 256, 
-        num_wo: int = 4,
-        rng_state: int = 0,
+        num_points: int,
+        num_wi: int, 
+        num_wo: int,
+        rng_state: int,
         ):
     '''
     Inputs:
@@ -583,18 +526,18 @@ def compute_loss_multiLo_envmap(
     envmap = radiance_cache.scene.environment()
 
     with dr.suspend_grad():
-        sampler_rt: mi.Sampler = mi.load_dict({'type': 'independent'})
+        sampler: mi.Sampler = mi.load_dict({'type': 'independent'})
 
         # Sample `NUM_POINTS` different surface points
-        si, delta_emitter_sample, delta_emitter_Li, rng_state = scene_sampler.sample(num_points, sampler_rt, rng_state)
+        si, delta_emitter_sample, delta_emitter_Li, rng_state = scene_sampler.sample(num_points, sampler, rng_state)
 
         # Build the "wide" `si`
         si_wide = dr.gather(type(si), si, dr.repeat(dr.arange(UInt, num_points), num_wi), dr.ReduceMode.Local)
 
         # RHS: Evaluate incident directions
-        Li_em, wi_em, active_em, rng_state    = radiance_cache.eval_Li_envmap(si_wide, sampler_rt, envmap, SamplingMethod.Emitter, rng_state)
-        Li_mat, wi_mat, active_mat, rng_state = radiance_cache.eval_Li_envmap(si_wide, sampler_rt, envmap, SamplingMethod.Cosine, rng_state)
-        Li_env, wi_env, active_env, rng_state = radiance_cache.eval_Li_envmap(si_wide, sampler_rt, envmap, SamplingMethod.Envmap, rng_state)
+        Li_em, wi_em, active_em, rng_state    = radiance_cache.eval_Li_envmap(si_wide, sampler, envmap, SamplingMethod.Emitter, rng_state)
+        Li_mat, wi_mat, active_mat, rng_state = radiance_cache.eval_Li_envmap(si_wide, sampler, envmap, SamplingMethod.Cosine, rng_state)
+        Li_env, wi_env, active_env, rng_state = radiance_cache.eval_Li_envmap(si_wide, sampler, envmap, SamplingMethod.Envmap, rng_state)
 
         # RHS delta term: Perform ray visibility test from `si` to the delta emitter
         vis_rays = si.spawn_ray(delta_emitter_sample.d)
@@ -615,7 +558,7 @@ def compute_loss_multiLo_envmap(
 
             # LHS: evaluate the emissive and outgoing radiances
             Le = radiance_cache.eval_Le(si)
-            Lo, active_si, rng_state = radiance_cache.eval_Lo(si, sampler_rt, rng_state)
+            Lo, active_si, rng_state = radiance_cache.eval_Lo(si, sampler, rng_state)
             lhs = -Le + Lo
 
             # RHS: integrate over the incident directions and update the loss
@@ -628,8 +571,8 @@ def compute_loss_multiLo_envmap(
                 loss += 0.5 * dr.mean(residuals) / num_wo
 
             # Pick new outgoing directions to sample
-            sampler_rt.seed(rng_state, num_points); rng_state += 0x00FF_FFFF
-            si.wi = mi.warp.square_to_cosine_hemisphere(sampler_rt.next_2d())
+            sampler.seed(rng_state, num_points); rng_state += 0x00FF_FFFF
+            si.wi = mi.warp.square_to_cosine_hemisphere(sampler.next_2d())
 
             # Update `si_wide` with the new directions
             si_wide.wi = dr.gather(mi.Vector3f, si.wi, dr.repeat(dr.arange(UInt, num_points), num_wi), dr.ReduceMode.Local)
