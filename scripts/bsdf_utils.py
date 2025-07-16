@@ -142,14 +142,114 @@ def render_base_color(scene: mi.Scene, img_res = None, write_img = True, filenam
 
     return image_out
 
+# def render_attributes(scene: mi.Scene, img_res = None, write_img = True, filename: str = "optimized"):
+#     '''
+#     Render all the vertex BSDF attributes to an OpenEXR image.
+#     '''
+#     if img_res is None:
+#         film_size = scene.sensors()[0].film().size()
+#         img_res = (film_size[1], film_size[0])
+#     us, vs = dr.meshgrid(dr.linspace(Float, 0.0, 1.0, img_res[0]), dr.linspace(Float, 0.0, 1.0, img_res[1]))
+#     sensor = scene.sensors()[0]
+#     rays, _ = sensor.sample_ray(0.0, 0.0, mi.Point2f(us, vs), dr.zeros(mi.Point2f))
+#     si = scene.ray_intersect(rays)
+#     mesh = si.shape
+#     mask = si.is_valid()
+
+#     # Handle the base color first
+#     image_rgb = dr.select(mask, 
+#                     mesh.eval_attribute_3("vertex_bsdf_base_color", si),
+#                     mi.Color3f(0.0))
+#     images = [image_rgb]
+#     channel_counts = [3]
+#     total_channels = 3
+
+#     # Handle the scalar attributes
+#     keys = ['base_color', 'roughness', 'metallic', 'anisotropic', 'spec_tint']
+#     for key in keys[1:]:
+#         attrib = f"vertex_bsdf_{key}"
+#         if dr.any(mesh.has_attribute(attrib)):
+#             image = dr.select(si.is_valid(), 
+#                             mesh.eval_attribute_1(attrib, si),
+#                             0.0)
+#         else:
+#             image = dr.full(Float, 0.0, img_res[0] * img_res[1])
+#         images.append(image)
+#         channel_counts.append(1)
+#         total_channels += 1
+
+#     image_out = dr.full(mi.TensorXf, 0.0, (img_res[1], img_res[0], total_channels))
+
+#     curr_channel = 0
+#     for image, channel_count, key in zip(images, channel_counts, keys):
+#         image_out[:, :, curr_channel: curr_channel + channel_count] = dr.ravel(image)
+#         curr_channel += channel_count
+    
+#     channel_names = [keys[0] + color for color in ['.R', '.G', '.B']] + keys[1:]
+#     if write_img:
+#         bitmap = mi.Bitmap(image_out, 
+#                            pixel_format = mi.Bitmap.PixelFormat.MultiChannel, 
+#                            channel_names = channel_names)
+#         bitmap.write(filename + f"_multichannel.exr")
+#     return image_out
+
+
+# def render_attributes_gt(scene: mi.Scene, img_res = None, write_img = True, filename: str = "optimized"):
+#     '''
+#     Render the BSDF attributes from the ground truth scene to an OpenEXR image.
+#     '''
+#     if img_res is None:
+#         film_size = scene.sensors()[0].film().size()
+#         img_res = (film_size[1], film_size[0])
+#     us, vs = dr.meshgrid(dr.linspace(Float, 0.0, 1.0, img_res[0]), dr.linspace(Float, 0.0, 1.0, img_res[1]))
+#     sensor = scene.sensors()[0]
+#     rays, _ = sensor.sample_ray(0.0, 0.0, mi.Point2f(us, vs), dr.zeros(mi.Point2f))
+#     si = scene.ray_intersect(rays)
+#     mesh = si.shape
+#     bsdf = mesh.bsdf()
+#     mask = si.is_valid()
+
+#     # Handle the base color first
+#     image_rgb = dr.select(mask, 
+#                     bsdf.eval_attribute_3("base_color", si),
+#                     mi.Color3f(0.0))
+#     images = [image_rgb]
+#     channel_counts = [3]
+#     total_channels = 3
+
+#     # Handle the scalar attributes
+#     keys = ['base_color', 'roughness', 'metallic', 'anisotropic', 'spec_tint']
+#     for key in keys[1:]:
+#         image = dr.select(si.is_valid(), 
+#                         bsdf.eval_attribute_1(key, si),
+#                         0.0)
+#         images.append(image)
+#         channel_counts.append(1)
+#         total_channels += 1
+
+#     image_out = dr.full(mi.TensorXf, 0.0, (img_res[1], img_res[0], total_channels))
+
+#     curr_channel = 0
+#     for image, channel_count, key in zip(images, channel_counts, keys):
+#         image_out[:, :, curr_channel: curr_channel + channel_count] = dr.ravel(image)
+#         curr_channel += channel_count
+    
+#     channel_names = [keys[0] + color for color in ['.R', '.G', '.B']] + keys[1:]
+#     if write_img:
+#         bitmap = mi.Bitmap(image_out, 
+#                            pixel_format = mi.Bitmap.PixelFormat.MultiChannel, 
+#                            channel_names = channel_names)
+#         bitmap.write(filename + f"_multichannel.exr")
+#     return image_out
+
 def render_attributes(scene: mi.Scene, img_res = None, write_img = True, filename: str = "optimized"):
     '''
     Render all the vertex BSDF attributes to an OpenEXR image.
     '''
     if img_res is None:
         film_size = scene.sensors()[0].film().size()
-        img_res = (film_size[0], film_size[1])
-    us, vs = dr.meshgrid(dr.linspace(Float, 0.0, 1.0, img_res[0]), dr.linspace(Float, 0.0, 1.0, img_res[1]))
+        img_res = (film_size.y, film_size.x)
+    us, vs = dr.meshgrid(dr.linspace(Float, 0.0, 1.0, img_res[1]), dr.linspace(Float, 0.0, 1.0, img_res[0]))
     sensor = scene.sensors()[0]
     rays, _ = sensor.sample_ray(0.0, 0.0, mi.Point2f(us, vs), dr.zeros(mi.Point2f))
     si = scene.ray_intersect(rays)
@@ -200,8 +300,8 @@ def render_attributes_gt(scene: mi.Scene, img_res = None, write_img = True, file
     '''
     if img_res is None:
         film_size = scene.sensors()[0].film().size()
-        img_res = (film_size[0], film_size[1])
-    us, vs = dr.meshgrid(dr.linspace(Float, 0.0, 1.0, img_res[0]), dr.linspace(Float, 0.0, 1.0, img_res[1]))
+        img_res = (film_size.y, film_size.x)
+    us, vs = dr.meshgrid(dr.linspace(Float, 0.0, 1.0, img_res[1]), dr.linspace(Float, 0.0, 1.0, img_res[0]))
     sensor = scene.sensors()[0]
     rays, _ = sensor.sample_ray(0.0, 0.0, mi.Point2f(us, vs), dr.zeros(mi.Point2f))
     si = scene.ray_intersect(rays)
@@ -209,16 +309,17 @@ def render_attributes_gt(scene: mi.Scene, img_res = None, write_img = True, file
     bsdf = mesh.bsdf()
     mask = si.is_valid()
 
+    albedo_key = "base_color" if dr.any(bsdf.has_attribute("base_color")) else "reflectance"
     # Handle the base color first
     image_rgb = dr.select(mask, 
-                    bsdf.eval_attribute_3("base_color", si),
+                    bsdf.eval_diffuse_reflectance(si),
                     mi.Color3f(0.0))
     images = [image_rgb]
     channel_counts = [3]
     total_channels = 3
 
     # Handle the scalar attributes
-    keys = ['base_color', 'roughness', 'metallic', 'anisotropic', 'spec_tint']
+    keys = [albedo_key, 'roughness', 'metallic', 'anisotropic', 'spec_tint']
     for key in keys[1:]:
         image = dr.select(si.is_valid(), 
                         bsdf.eval_attribute_1(key, si),

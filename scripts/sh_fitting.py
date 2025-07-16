@@ -63,23 +63,35 @@ def fit_sh_on_mesh_vertex(scene: mi.Scene, mesh_idx: int, mesh_vtx_idx: int, max
             buffer=dr.ravel(Lo_coeff))
     sh_color = dr.clip(sh_color, 0.0, 1.0)
 
-    def hideaxis():
-        plt.tick_params(
-            axis='both', which='both',
-            # bottom=False, top=False,
-            # left=False, right=False,
-            labelbottom=False,
-            labelleft=False)
+    def setaxis(ax):
+        ax.set_xticks([0.0, dr.pi/2, dr.pi, dr.pi/2 * 3, dr.pi*2]); ax.set_xlabel(r"$\varphi$")
+        ax.set_xticklabels([r"0.0", r"0.5$\pi$", r"$\pi$", r"1.5$\pi$", r"2$\pi$"])
+        ax.set_yticks([0.0, dr.pi/2]); ax.set_ylabel(r"$\theta$")
+        ax.set_yticklabels([r"0.0", r"0.5$\pi$"])
+
+    def setaxis_noX(ax):
+        ax.set_yticks([0.0, dr.pi/2]); ax.set_ylabel(r"$\theta$")
+        ax.set_yticklabels([r"0.0", r"0.5$\pi$"])
+        ax.set_xticks([0.0, dr.pi/2, dr.pi, dr.pi/2 * 3, dr.pi*2]); ax.set_xticklabels(""); ax.set_xlabel("")
+        ax.set_title(r"$L_{i}(\omega)$, 3DGS")
+
+    Lo_ref = mi.TensorXf(Lo_per_d).numpy().reshape(3, Nquad + 1, -1).swapaxes(0,2)
+    Lo_sh  = mi.TensorXf(sh_color).numpy().reshape(3, Nquad + 1, -1).swapaxes(0,2)
+    H = Lo_ref.shape[0] // 2
 
     plt.figure(figsize=(12,7), dpi=200)
-    plt.subplot(211); plt.title("Reference")
-    plt.imshow(mi.TensorXf(Lo_per_d).numpy().reshape(3,Nquad+1, -1).swapaxes(0,2))
-    hideaxis()
-    plt.xlabel(r"$\phi$"), plt.ylabel(r"$\theta$")
-    plt.subplot(212); plt.title(f"Spherical harmonics fit (degree = {max_order})")
-    plt.imshow(mi.TensorXf(sh_color).numpy().reshape(3,Nquad+1, -1).swapaxes(0,2))
-    plt.xlabel(r"$\phi$"), plt.ylabel(r"$\theta$")
-    hideaxis()
+    extent = [0, dr.two_pi, dr.pi/2, 0]
+
+    plt.subplot(211); 
+    plt.title("Reference")
+    plt.imshow(Lo_ref[:H,:,:] ** (1/2.2), extent=extent)
+    setaxis_noX(plt.gca())
+
+    plt.subplot(212); 
+    plt.title(f"Spherical harmonics fit (degree = {max_order})")
+    plt.imshow(Lo_sh[:H,:,:] ** (1/2.2), extent=extent)
+    setaxis(plt.gca())
+
     plt.tight_layout()
 
 
@@ -189,6 +201,11 @@ def fit_sh_on_mesh_batched(scene: mi.Scene, mesh: mi.Mesh, max_order: int, Nquad
 
 def fit_sh_on_scene(scene: mi.Scene, max_order: int, Nquad: int = 128, spp: int = 64):
     meshes = [shape for shape in scene.shapes() if shape.is_mesh()]
+    for idx, mesh in enumerate(tqdm(meshes)):
+        fit_sh_on_mesh_batched(scene, mesh, max_order, Nquad, spp, seed=idx)
+
+def fit_sh_on_meshes(scene: mi.Scene, mesh_indices: list[int], max_order: int, Nquad: int = 128, spp: int = 64):
+    meshes = [shape for idx, shape in enumerate(scene.shapes()) if idx in mesh_indices]
     for idx, mesh in enumerate(tqdm(meshes)):
         fit_sh_on_mesh_batched(scene, mesh, max_order, Nquad, spp, seed=idx)
 

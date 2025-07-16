@@ -13,16 +13,21 @@ def is_delta_emitter(emitter: mi.Emitter):
            (emitter.m_flags & mi.EmitterFlags.DeltaDirection)
 
 class SceneSurfaceSampler:
-    def __init__(self, scene: mi.Scene, method="equiarea"):
+    def __init__(self, scene: mi.Scene, method="equiarea", mesh_indexes: list[int] = None):
         shape_ptrs = scene.shapes_dr()
+        if mesh_indexes is not None:
+            pmfs = dr.zeros(Float, dr.width(shape_ptrs))
+            for idx in mesh_indexes:
+                pmfs[idx] = 1.0
         if method == "equiarea":
             # probability is proportional to mesh area
-            self.distribution = mi.DiscreteDistribution(shape_ptrs.surface_area())
+            pmfs = mi.DiscreteDistribution(shape_ptrs.surface_area())
         elif method == "mesh-res":
             # probability is inversely proportional to avg_triangle_area
             prims_per_shape = dr.select(shape_ptrs.is_mesh(), mi.MeshPtr(shape_ptrs).face_count(), 1)
             mean_prim_area = shape_ptrs.surface_area() / prims_per_shape
-            self.distribution = mi.DiscreteDistribution(dr.rcp(mean_prim_area))
+            pmfs = mi.DiscreteDistribution(dr.rcp(mean_prim_area))
+        self.distribution = pmfs
         self.shape_ptrs = shape_ptrs
         self.has_delta_emitters = dr.any((scene.emitters_dr().flags() & UInt(mi.EmitterFlags.Delta)) > 0)
         self.delta_emitters = [emitter for emitter in scene.emitters() if is_delta_emitter(emitter)]
@@ -162,10 +167,19 @@ class RadianceCacheMiSH:
         si = self.scene.ray_intersect(wi_rays)
         Li = self.query_cached_Lo(si, si.is_valid())
 
+        envmap = self.scene.environment()
+        if envmap is not None:
+            si_ = mi.SurfaceInteraction3f(si_flattened)
+            si_.wi = -wi_rays.d
+            Li += envmap.eval(si_, ~si.is_valid())
+
+
         # Account for sampling weight
         Li = dr.select(wi_pdf > 0.0, Li * dr.rcp(wi_pdf), dr.zeros(mi.Color3f))
 
         return Li, wi_local, si_flattened
+
+
 
 def compute_loss(
     scene_sampler: SceneSurfaceSampler, 
@@ -173,6 +187,7 @@ def compute_loss(
     trainable_bsdf: Principled | mi.BSDF,
     num_points: int,
     num_wi: int, 
+    num_wo: int,
     rng_state: int
     ):
     '''
@@ -185,35 +200,42 @@ def compute_loss(
     Outputs:
         - loss: Float. The scalar loss.
     '''
+    loss = Float(0.0)
+    dr.enable_grad(loss)
+    envmap = radiance_cache.scene.environment()
+
     with dr.suspend_grad():
         # Temp workaround. TODO: avoid initializing a new sampler at each iteration
         sampler_rt: mi.Sampler = mi.load_dict({'type': 'independent'})
         ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
 
         # Sample `NUM_POINTS` different surface points
-        si, delta_emitter_sample, delta_emitter_Li = scene_sampler.sample(num_points, sampler_rt, rng_state)
-
-        # perform a ray visibility test from `si` to the delta emitter
-        vis_rays = si.spawn_ray(delta_emitter_sample.d)
-        vis_rays.maxt = delta_emitter_sample.dist
-        emitter_occluded = radiance_cache.scene.ray_test(vis_rays)
-        delta_emitter_Li &= ~emitter_occluded
-
-        # Evaluate RHS scene emitter contribution
-        with dr.resume_grad():
-            f_emitter = trainable_bsdf.eval(ctx, si, wo = si.to_local(delta_emitter_sample.d), active = True)
-            rhs = f_emitter * delta_emitter_Li
-
-        # Evaluate LHS of balance equation
-        lhs = radiance_cache.query_cached_Lo(si) - radiance_cache.query_cached_Le(si)
+        si, delta_emitter_sample, delta_emitter_Li = scene_sampler.sample(num_points, sampler_rt, rng_state)[:3]
 
         # Evaluate RHS integral
         Li, wi_local, si_flattened = radiance_cache.query_cached_Li(si, num_wi, sampler_rt, rng_state + 0x0FFF_FFFF)
+        dr.eval(Li, wi_local, si_flattened)
 
-        with dr.resume_grad():
-            f_io = trainable_bsdf.eval(ctx, si = si_flattened, wo = wi_local, active = True)
-            integrand = f_io * Li
-            rhs += dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
+        ctx = mi.BSDFContext(mi.TransportMode.Radiance, mi.BSDFFlags.All)
+        # Loop through the outgoing directions
+        for _ in range(num_wo):
+            rhs = dr.zeros(mi.Color3f, num_points)
+
+            # Evaluate LHS of balance equation
+            lhs = radiance_cache.query_cached_Lo(si)
+
+            with dr.resume_grad():
+                f_io = trainable_bsdf.eval(ctx, si = si_flattened, wo = wi_local, active = True)
+                integrand = f_io * Li
+                rhs = dr.block_reduce(dr.ReduceOp.Add, integrand, block_size = num_wi) / num_wi
+                scale = dr.detach(dr.sqr(0.5 * (lhs + rhs)) + 1e-2)
+                residuals = dr.sqr(lhs - rhs)
+                loss += 0.5 * dr.mean(residuals / scale, axis=None) / num_wo
+
+            # Pick new outgoing directions to sample
+            sampler_rt.seed(rng_state, num_points); rng_state += 0x00FF_FFFF
+            si.wi = mi.warp.square_to_uniform_hemisphere(sampler_rt.next_2d())
+            si_flattened.wi = dr.repeat(si.wi, num_wi)
 
             # # # DEBUG
             # print(f"Li:{rhs}")
@@ -226,4 +248,4 @@ def compute_loss(
             # # print(f"Lo_an:{L_an}")
             # # print(L_an/lhs)
 
-            return 0.5 * dr.mean(dr.squared_norm(lhs - rhs))
+    return 0.5 * dr.mean(dr.squared_norm(lhs - rhs))

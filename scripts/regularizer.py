@@ -42,16 +42,20 @@ class TVRegularizer:
         vtx1_val = dr.gather(type(attrib), attrib, edges_dr.y, mode = dr.ReduceMode.Direct) 
         return dr.mean(dr.abs(vtx0_val - vtx1_val), axis=None)
 
-    def compute_loss(self, scene: mi.Scene, attrib_keys: list[str] = [])-> Float:
+    def compute_loss(self, scene: mi.Scene, mesh_indexes: list[int] = None, attrib_keys: list[str] = [])-> Float:
         loss = Float(0.0)
-        for mesh, edges in zip(scene.shapes_dr(), self.mesh_edge_lists):
+        for idx, (mesh, edges) in enumerate(zip(scene.shapes_dr(), self.mesh_edge_lists)):
+            if mesh_indexes is not None and idx not in mesh_indexes:
+                continue
+
             if dr.width(edges) < 1:
                 continue
+
             # Compute the TV on each of the mesh's active attributes
             mesh_loss = Float(0.0)
             for key in attrib_keys:
                 mesh_loss += self._compute_TV_scalar(mesh, dr.detach(edges), key)
-            mesh_loss += self._compute_TV_color(mesh, dr.detach(edges))
+            # mesh_loss += self._compute_TV_color(mesh, dr.detach(edges))
 
             # Update the global TV loss; the mesh's contribution is normalized by its edge count
             loss += mesh_loss
